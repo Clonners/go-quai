@@ -96,6 +96,16 @@ Mining-template integration is still a later stage.
   - `VerifyHierarchyProof`
   - read-only Zone/Region -> Prime manifest wrapper checks
 
+- `core/nipopow/hierarchy_collect.go`
+  - `HierarchyProofSource`
+  - `HierarchyProofRequest`
+  - `CollectHierarchyProof`
+  - `CollectHierarchyProofWithContext`
+  - read-only source/population seam for fixtures, chain storage, or future block-template paths
+
+- `cmd/nipopow-hierarchy-validate`
+  - read-only JSON CLI that opens Prime/Region/Zone DB snapshots and validates an explicit hierarchy wrapper request
+
 - `core/headerchain_nipopow.go`
   - read-only bridge from canonical chain storage into the proof builder
 
@@ -279,11 +289,52 @@ The wrapper verifies:
 
 This is still not mining-template integration. It intentionally does not read or write chain DB state, expose RPC, change consensus, or mutate block-template behavior. It is a self-contained verifier primitive for proving that the wrapper shape is enforceable before wiring it into real template production.
 
-### Level 5: mining-template readiness
+### Level 5: read-only hierarchy source/collector
+
+The package includes a source/population seam and a DB-snapshot CLI for collecting a hierarchy wrapper from already-persisted data:
+
+```go
+proof, err := nipopow.CollectHierarchyProofWithContext(ctx, source, nipopow.HierarchyProofRequest{
+    ZoneHash:    zoneHash,
+    RegionHash:  regionHash,
+    PrimeAnchor: primeAnchor,
+    PrimeTip:    primeManifestCarrier,
+    M:           m,
+    Limits:      limits,
+})
+```
+
+The source must provide read-only headers, manifests, and Prime proof headers:
+
+```go
+type HierarchyProofSource interface {
+    nipopow.PrimeProofSource
+    Header(hash common.Hash, nodeCtx int) (*types.WorkObject, error)
+    Manifest(hash common.Hash, nodeCtx int) (types.BlockManifest, error)
+}
+```
+
+A local/offline validation command is available for explicit real-data requests:
+
+```bash
+go run ./cmd/nipopow-hierarchy-validate \
+  --prime.db /path/to/prime/go-quai/chaindata \
+  --region.db /path/to/region-0/go-quai/chaindata \
+  --zone.db /path/to/zone-0-0/go-quai/chaindata \
+  --zone-hash 0x... \
+  --region-hash 0x... \
+  --prime-anchor 0x... \
+  --prime-tip 0x... \
+  --m 16
+```
+
+This command opens all DBs with `ReadOnly: true`, hydrates manifests from storage, builds the Prime proof, verifies the hierarchy wrapper, and emits a JSON report. It still does not expose RPC, mutate DB state, or change mining-template behavior.
+
+### Level 6: mining-template readiness
 
 Mining-template use requires the later stages:
 
-1. Source/populate hierarchy wrapper data from real block-template/HeaderChain paths.
+1. Source/populate hierarchy wrapper data from actual block-template/HeaderChain selection paths, not just explicit hashes.
 2. Pool/client verifier library or example.
 3. Optional proof delivery through `quai_getBlockTemplate`.
 4. Config/feature flag and request limits.

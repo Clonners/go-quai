@@ -328,7 +328,31 @@ go run ./cmd/nipopow-hierarchy-validate \
   --m 16
 ```
 
-This command opens all DBs with `ReadOnly: true`, hydrates manifests from storage, builds the Prime proof, verifies the hierarchy wrapper, and emits a JSON report. It still does not expose RPC, mutate DB state, or change mining-template behavior.
+The CLI can also derive a consistent tuple from read-only snapshots without preselecting hashes:
+
+```bash
+go run ./cmd/nipopow-hierarchy-validate \
+  --prime.db /path/to/prime/go-quai/chaindata \
+  --region.db /path/to/region-0/go-quai/chaindata \
+  --zone.db /path/to/zone-0-0/go-quai/chaindata \
+  --auto-select \
+  --auto.region-window 4096 \
+  --auto.prime-window 4096 \
+  --max-chain 1024 \
+  --max-headers 1024 \
+  --max-m 1024 \
+  --timeout 4m \
+  --out hierarchy-auto-selector-report.json
+```
+
+This command opens all DBs with `ReadOnly: true`, hydrates manifests from storage, builds the Prime proof, verifies the hierarchy wrapper, and emits a JSON report. The auto-selector is bounded and context-cancellable; reports include scan counts, candidate counts, selected hashes, selected block numbers, proof header count, and manifest lengths.
+
+Real-chain storage has two important hierarchy details:
+
+- The committed manifest should be read from the `WorkObjectBody` when available. Standalone manifest records can be absent for Prime or stale/mismatched for Region; they are kept as a fallback only.
+- `WorkObject.Location()` is the origin slice, not the proof order. Coincident Region/Prime carriers can be zone-located work objects, so the verifier binds them through manifest commitments, Prime proof membership, and region path instead of rejecting solely on `Location().Context()`.
+
+The hierarchy CLI still does not expose RPC, mutate DB state, or change mining-template behavior.
 
 ### Level 6: mining-template readiness
 

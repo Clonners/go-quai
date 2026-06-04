@@ -105,8 +105,13 @@ func verifyHierarchyHeader(label string, header *types.WorkObject, wantCtx int) 
 	if err := verifyUsableHeader(header); err != nil {
 		return fmt.Errorf("%s header: %w", label, err)
 	}
-	if gotCtx := header.Location().Context(); gotCtx != wantCtx {
-		return fmt.Errorf("%w: %s header has context %d want %d", ErrHierarchyLocationMismatch, label, gotCtx, wantCtx)
+	// WorkObject.Location() identifies the origin slice. In real chain storage,
+	// Region/Prime coincident carriers can still be zone-located WorkObjects;
+	// their order/source context is established by the chain source and the
+	// manifest/proof path, not by Location().Context(). The Zone leaf must remain
+	// a concrete Zone location because its region path is checked below.
+	if wantCtx == common.ZONE_CTX && header.Location().Context() != common.ZONE_CTX {
+		return fmt.Errorf("%w: %s header has location context %d want zone location", ErrHierarchyLocationMismatch, label, header.Location().Context())
 	}
 	return nil
 }

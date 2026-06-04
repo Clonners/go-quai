@@ -18,6 +18,17 @@ func TestVerifyHierarchyProofAcceptsZoneRegionPrimeManifestBinding(t *testing.T)
 	}
 }
 
+func TestVerifyHierarchyProofAcceptsCoincidentHeadersWithZoneLocation(t *testing.T) {
+	proof := testHierarchyProof(t)
+	proof.RegionHeader.WorkObjectHeader().SetLocation(common.Location{0, 0})
+	proof.PrimeHeader.WorkObjectHeader().SetLocation(common.Location{0, 0})
+	rebindHierarchyManifests(t, proof)
+
+	if err := VerifyHierarchyProof(proof); err != nil {
+		t.Fatalf("expected coincident zone-located Region/Prime carriers to verify: %v", err)
+	}
+}
+
 func TestVerifyHierarchyProofRejectsBrokenManifestCommitments(t *testing.T) {
 	tests := []struct {
 		name   string

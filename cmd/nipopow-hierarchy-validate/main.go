@@ -38,7 +38,28 @@ type cliConfig struct {
 	OutPath           string
 	Timeout           time.Duration
 	Request           nipopow.HierarchyProofRequest
+	AutoSelect        autoSelectConfig
 }
+
+type autoSelectConfig struct {
+	Enabled      bool
+	RegionWindow uint64
+	PrimeWindow  uint64
+	Limits       nipopow.BuildLimits
+}
+
+type autoSelectStats struct {
+	RegionBlocksScanned   uint64            `json:"regionBlocksScanned"`
+	PrimeBlocksScanned    uint64            `json:"primeBlocksScanned"`
+	RegionManifestEntries uint64            `json:"regionManifestEntries"`
+	PrimeManifestEntries  uint64            `json:"primeManifestEntries"`
+	CandidatesConsidered  uint64            `json:"candidatesConsidered"`
+	CandidatesRejected    uint64            `json:"candidatesRejected"`
+	SelectedChainLength   uint64            `json:"selectedChainLength,omitempty"`
+	RejectReasons         map[string]uint64 `json:"rejectReasons,omitempty"`
+}
+
+var ErrNoHierarchyCandidate = errors.New("no hierarchy proof candidate found")
 
 type hierarchyOutput struct {
 	StartedAtUTC      string                        `json:"startedAtUtc"`
@@ -53,6 +74,8 @@ type hierarchyOutput struct {
 	RegionLocation    string                        `json:"regionLocation"`
 	ZoneLocation      string                        `json:"zoneLocation"`
 	Request           nipopow.HierarchyProofRequest `json:"request"`
+	AutoSelect        bool                          `json:"autoSelect"`
+	AutoSelectStats   *autoSelectStats              `json:"autoSelectStats,omitempty"`
 	OpenElapsedMS     int64                         `json:"openElapsedMs,omitempty"`
 	CollectElapsedMS  int64                         `json:"collectElapsedMs,omitempty"`
 	ZoneNumber        uint64                        `json:"zoneNumber,omitempty"`
@@ -97,6 +120,7 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 		RegionLocation:    cfg.RegionLocation.Name(),
 		ZoneLocation:      cfg.ZoneLocation.Name(),
 		Request:           cfg.Request,
+		AutoSelect:        cfg.AutoSelect.Enabled,
 	}
 	defer func() {
 		out.FinishedAtUTC = time.Now().UTC().Format(time.RFC3339Nano)
@@ -107,7 +131,7 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 	out.OpenElapsedMS = time.Since(openStarted).Milliseconds()
 	if err != nil {
 		out.Error = fmt.Sprintf("open readonly dbs: %v", err)
-		_ = writeReport(stdout, cfg.OutPath, out)
+		_ = writeFinalReport(stdout, cfg.OutPath, &out)
 		return 1
 	}
 	defer closeFn()
@@ -118,12 +142,28 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
 		defer cancel()
 	}
+	if cfg.AutoSelect.Enabled {
+		selected, stats, err := selectHierarchyProofRequest(ctx, source, autoSelectConfig{
+			Enabled:      true,
+			RegionWindow: cfg.AutoSelect.RegionWindow,
+			PrimeWindow:  cfg.AutoSelect.PrimeWindow,
+			Limits:       cfg.Request.Limits,
+		})
+		out.AutoSelectStats = &stats
+		if err != nil {
+			out.Error = fmt.Sprintf("auto-select: %v", err)
+			_ = writeFinalReport(stdout, cfg.OutPath, &out)
+			return 1
+		}
+		cfg.Request = selected
+		out.Request = selected
+	}
 	collectStarted := time.Now()
 	proof, err := nipopow.CollectHierarchyProofWithContext(ctx, source, cfg.Request)
 	out.CollectElapsedMS = time.Since(collectStarted).Milliseconds()
 	if err != nil {
 		out.Error = err.Error()
-		_ = writeReport(stdout, cfg.OutPath, out)
+		_ = writeFinalReport(stdout, cfg.OutPath, &out)
 		return 1
 	}
 
@@ -134,7 +174,7 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 	out.RegionManifestLen = len(proof.RegionHeader.Manifest())
 	out.PrimeManifestLen = len(proof.PrimeHeader.Manifest())
 	out.OK = true
-	if err := writeReport(stdout, cfg.OutPath, out); err != nil {
+	if err := writeFinalReport(stdout, cfg.OutPath, &out); err != nil {
 		fmt.Fprintf(stderr, "error writing report: %v\n", err)
 		return 1
 	}
@@ -168,7 +208,10 @@ func parseCLI(args []string, stderr io.Writer) (cliConfig, error) {
 	fs.StringVar(&regionHash, "region-hash", "", "Region header hash to bind into the Prime manifest")
 	fs.StringVar(&primeAnchor, "prime-anchor", "", "Prime proof anchor hash")
 	fs.StringVar(&primeTip, "prime-tip", "", "Prime manifest carrier / proof tip hash")
-	fs.Uint64Var(&cfg.Request.M, "m", 16, "NiPoPoW suffix length")
+	fs.BoolVar(&cfg.AutoSelect.Enabled, "auto-select", false, "Derive Zone/Region/Prime hashes by scanning read-only manifests instead of requiring explicit hashes")
+	fs.Uint64Var(&cfg.AutoSelect.RegionWindow, "auto.region-window", nipopow.DefaultMaxProofChainLength, "Maximum canonical Region blocks to scan backwards for a Zone manifest entry")
+	fs.Uint64Var(&cfg.AutoSelect.PrimeWindow, "auto.prime-window", nipopow.DefaultMaxProofChainLength, "Maximum canonical Prime blocks to scan backwards for a Region manifest entry")
+	fs.Uint64Var(&cfg.Request.M, "m", 16, "NiPoPoW suffix length for explicit mode; auto-select derives a full suffix for the selected range")
 	fs.Uint64Var(&cfg.Request.Limits.MaxChainLength, "max-chain", nipopow.DefaultMaxProofChainLength, "Maximum Prime canonical chain walk length")
 	fs.Uint64Var(&cfg.Request.Limits.MaxProofHeaders, "max-headers", nipopow.DefaultMaxProofHeaders, "Maximum compressed Prime proof header count")
 	fs.Uint64Var(&cfg.Request.Limits.MaxM, "max-m", nipopow.DefaultMaxProofM, "Maximum allowed m")
@@ -197,6 +240,10 @@ func parseCLI(args []string, stderr io.Writer) (cliConfig, error) {
 	if cfg.ZoneAncientPath == "" {
 		cfg.ZoneAncientPath = defaultAncientPath(cfg.ZoneDBPath)
 	}
+	if cfg.AutoSelect.Enabled {
+		cfg.AutoSelect.Limits = cfg.Request.Limits
+		return cfg, nil
+	}
 	if cfg.Request.ZoneHash, err = parseRequiredHash("zone-hash", zoneHash); err != nil {
 		return cfg, err
 	}
@@ -209,6 +256,7 @@ func parseCLI(args []string, stderr io.Writer) (cliConfig, error) {
 	if cfg.Request.PrimeTip, err = parseRequiredHash("prime-tip", primeTip); err != nil {
 		return cfg, err
 	}
+	cfg.AutoSelect.Limits = cfg.Request.Limits
 	return cfg, nil
 }
 
@@ -248,6 +296,228 @@ func defaultAncientPath(dbPath string) string {
 		return candidate
 	}
 	return ""
+}
+
+type hierarchySelectionSource interface {
+	Head(nodeCtx int) (common.Hash, uint64, bool)
+	CanonicalHash(number uint64, nodeCtx int) common.Hash
+	HeaderNumber(hash common.Hash, nodeCtx int) (uint64, bool)
+	Header(hash common.Hash, nodeCtx int) (*types.WorkObject, error)
+	Manifest(hash common.Hash, nodeCtx int) (types.BlockManifest, error)
+}
+
+type primeCarrier struct {
+	Hash   common.Hash
+	Number uint64
+}
+
+func selectHierarchyProofRequest(ctx context.Context, source hierarchySelectionSource, cfg autoSelectConfig) (nipopow.HierarchyProofRequest, autoSelectStats, error) {
+	stats := autoSelectStats{RejectReasons: make(map[string]uint64)}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if source == nil {
+		return nipopow.HierarchyProofRequest{}, stats, ErrNoHierarchyCandidate
+	}
+	cfg = normalizeAutoSelectConfig(cfg)
+	primeCarriers, err := indexPrimeManifestCarriers(ctx, source, cfg, &stats)
+	if err != nil {
+		return nipopow.HierarchyProofRequest{}, stats, err
+	}
+	_, regionHeadNumber, ok := source.Head(common.REGION_CTX)
+	if !ok {
+		return nipopow.HierarchyProofRequest{}, stats, fmt.Errorf("%w: missing region head", ErrNoHierarchyCandidate)
+	}
+
+	for number := regionHeadNumber; ; number-- {
+		if err := ctx.Err(); err != nil {
+			return nipopow.HierarchyProofRequest{}, stats, err
+		}
+		if stats.RegionBlocksScanned >= cfg.RegionWindow {
+			break
+		}
+		regionHash := source.CanonicalHash(number, common.REGION_CTX)
+		if regionHash != (common.Hash{}) {
+			stats.RegionBlocksScanned++
+			request, found, err := selectFromRegionCandidate(ctx, source, primeCarriers, regionHash, cfg, &stats)
+			if err != nil {
+				return nipopow.HierarchyProofRequest{}, stats, err
+			}
+			if found {
+				return request, stats, nil
+			}
+		}
+		if number == 0 {
+			break
+		}
+	}
+	if len(stats.RejectReasons) == 0 {
+		stats.RejectReasons = nil
+	}
+	return nipopow.HierarchyProofRequest{}, stats, ErrNoHierarchyCandidate
+}
+
+func selectFromRegionCandidate(ctx context.Context, source hierarchySelectionSource, primeCarriers map[common.Hash][]primeCarrier, regionHash common.Hash, cfg autoSelectConfig, stats *autoSelectStats) (nipopow.HierarchyProofRequest, bool, error) {
+	regionHeader, err := source.Header(regionHash, common.REGION_CTX)
+	if err != nil || regionHeader == nil {
+		rejectCandidate(stats, "region-header")
+		return nipopow.HierarchyProofRequest{}, false, nil
+	}
+	regionTerminus := regionHeader.PrimeTerminusHash()
+	regionTerminusNumber, ok := source.HeaderNumber(regionTerminus, common.PRIME_CTX)
+	if !ok || regionTerminus == (common.Hash{}) {
+		rejectCandidate(stats, "region-prime-terminus")
+		return nipopow.HierarchyProofRequest{}, false, nil
+	}
+	if source.CanonicalHash(regionTerminusNumber, common.PRIME_CTX) != regionTerminus {
+		rejectCandidate(stats, "region-prime-terminus-noncanonical")
+		return nipopow.HierarchyProofRequest{}, false, nil
+	}
+	manifest, err := source.Manifest(regionHash, common.REGION_CTX)
+	if err != nil || manifest == nil {
+		rejectCandidate(stats, "region-manifest")
+		return nipopow.HierarchyProofRequest{}, false, nil
+	}
+	for _, zoneHash := range manifest {
+		if err := ctx.Err(); err != nil {
+			return nipopow.HierarchyProofRequest{}, false, err
+		}
+		stats.RegionManifestEntries++
+		zoneHeader, err := source.Header(zoneHash, common.ZONE_CTX)
+		if err != nil || zoneHeader == nil {
+			continue
+		}
+		if zoneHeader.Location().Context() != common.ZONE_CTX || zoneHeader.Location().Region() != regionHeader.Location().Region() {
+			rejectCandidate(stats, "location-mismatch")
+			continue
+		}
+		zoneTerminus := zoneHeader.PrimeTerminusHash()
+		zoneTerminusNumber, ok := source.HeaderNumber(zoneTerminus, common.PRIME_CTX)
+		if !ok || zoneTerminus == (common.Hash{}) {
+			rejectCandidate(stats, "zone-prime-terminus")
+			continue
+		}
+		if source.CanonicalHash(zoneTerminusNumber, common.PRIME_CTX) != zoneTerminus {
+			rejectCandidate(stats, "zone-prime-terminus-noncanonical")
+			continue
+		}
+		anchorHash := regionTerminus
+		anchorNumber := regionTerminusNumber
+		if zoneTerminusNumber < anchorNumber {
+			anchorHash = zoneTerminus
+			anchorNumber = zoneTerminusNumber
+		}
+		request, found := selectPrimeCarrier(primeCarriers, regionHash, zoneHash, anchorHash, anchorNumber, cfg, stats)
+		if found {
+			return request, true, nil
+		}
+	}
+	return nipopow.HierarchyProofRequest{}, false, nil
+}
+
+func indexPrimeManifestCarriers(ctx context.Context, source hierarchySelectionSource, cfg autoSelectConfig, stats *autoSelectStats) (map[common.Hash][]primeCarrier, error) {
+	_, primeHeadNumber, ok := source.Head(common.PRIME_CTX)
+	if !ok {
+		return nil, fmt.Errorf("%w: missing prime head", ErrNoHierarchyCandidate)
+	}
+	carriers := make(map[common.Hash][]primeCarrier)
+	localScanned := uint64(0)
+	for number := primeHeadNumber; ; number-- {
+		if err := ctx.Err(); err != nil {
+			return carriers, err
+		}
+		if localScanned >= cfg.PrimeWindow {
+			break
+		}
+		primeHash := source.CanonicalHash(number, common.PRIME_CTX)
+		if primeHash != (common.Hash{}) {
+			localScanned++
+			stats.PrimeBlocksScanned++
+			manifest, err := source.Manifest(primeHash, common.PRIME_CTX)
+			if err == nil && manifest != nil {
+				for _, regionHash := range manifest {
+					stats.PrimeManifestEntries++
+					carriers[regionHash] = append(carriers[regionHash], primeCarrier{Hash: primeHash, Number: number})
+				}
+			}
+		}
+		if number == 0 {
+			break
+		}
+	}
+	return carriers, nil
+}
+
+func selectPrimeCarrier(primeCarriers map[common.Hash][]primeCarrier, regionHash common.Hash, zoneHash common.Hash, anchorHash common.Hash, anchorNumber uint64, cfg autoSelectConfig, stats *autoSelectStats) (nipopow.HierarchyProofRequest, bool) {
+	for _, carrier := range primeCarriers[regionHash] {
+		stats.CandidatesConsidered++
+		if carrier.Number < anchorNumber {
+			rejectCandidate(stats, "prime-before-anchor")
+			continue
+		}
+		chainLength := carrier.Number - anchorNumber + 1
+		if !chainLengthWithinLimits(chainLength, cfg.Limits) {
+			rejectCandidate(stats, "proof-limits")
+			continue
+		}
+		stats.SelectedChainLength = chainLength
+		if len(stats.RejectReasons) == 0 {
+			stats.RejectReasons = nil
+		}
+		return nipopow.HierarchyProofRequest{
+			ZoneHash:    zoneHash,
+			RegionHash:  regionHash,
+			PrimeAnchor: anchorHash,
+			PrimeTip:    carrier.Hash,
+			M:           chainLength,
+			Limits:      cfg.Limits,
+		}, true
+	}
+	return nipopow.HierarchyProofRequest{}, false
+}
+
+func normalizeAutoSelectConfig(cfg autoSelectConfig) autoSelectConfig {
+	cfg.Limits = normalizeBuildLimits(cfg.Limits)
+	if cfg.RegionWindow == 0 {
+		cfg.RegionWindow = cfg.Limits.MaxChainLength
+	}
+	if cfg.PrimeWindow == 0 {
+		cfg.PrimeWindow = cfg.Limits.MaxChainLength
+	}
+	return cfg
+}
+
+func normalizeBuildLimits(limits nipopow.BuildLimits) nipopow.BuildLimits {
+	if limits.MaxChainLength == 0 {
+		limits.MaxChainLength = nipopow.DefaultMaxProofChainLength
+	}
+	if limits.MaxProofHeaders == 0 {
+		limits.MaxProofHeaders = nipopow.DefaultMaxProofHeaders
+	}
+	if limits.MaxM == 0 {
+		limits.MaxM = nipopow.DefaultMaxProofM
+	}
+	return limits
+}
+
+func chainLengthWithinLimits(chainLength uint64, limits nipopow.BuildLimits) bool {
+	limits = normalizeBuildLimits(limits)
+	return chainLength > 0 && chainLength <= limits.MaxChainLength && chainLength <= limits.MaxProofHeaders && chainLength <= limits.MaxM
+}
+
+func rejectCandidate(stats *autoSelectStats, reason string) {
+	stats.CandidatesRejected++
+	if stats.RejectReasons == nil {
+		stats.RejectReasons = make(map[string]uint64)
+	}
+	stats.RejectReasons[reason]++
+}
+
+func writeFinalReport(stdout io.Writer, outPath string, report *hierarchyOutput) error {
+	if report.FinishedAtUTC == "" {
+		report.FinishedAtUTC = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return writeReport(stdout, outPath, *report)
 }
 
 func writeReport(stdout io.Writer, outPath string, report hierarchyOutput) error {
@@ -338,11 +608,59 @@ func (s *rawHierarchySource) Manifest(hash common.Hash, nodeCtx int) (types.Bloc
 	if err != nil {
 		return nil, err
 	}
-	manifest := rawdb.ReadManifest(db, hash)
+	var manifest types.BlockManifest
+	number := rawdb.ReadHeaderNumber(db, hash)
+	if number != nil {
+		if block := rawdb.ReadWorkObject(db, *number, hash, types.BlockObject); block != nil && block.Manifest() != nil {
+			manifest = block.Manifest()
+		}
+	}
+	if manifest == nil {
+		manifest = rawdb.ReadManifest(db, hash)
+	}
 	if manifest == nil {
 		return nil, fmt.Errorf("manifest not found ctx=%d hash=%s", nodeCtx, hash.Hex())
 	}
 	return append(types.BlockManifest(nil), manifest...), nil
+}
+
+func (s *rawHierarchySource) Head(nodeCtx int) (common.Hash, uint64, bool) {
+	db, err := s.dbForContext(nodeCtx)
+	if err != nil {
+		return common.Hash{}, 0, false
+	}
+	hash := rawdb.ReadHeadBlockHash(db)
+	if hash == (common.Hash{}) {
+		hash = rawdb.ReadHeadHeaderHash(db)
+	}
+	if hash == (common.Hash{}) {
+		return common.Hash{}, 0, false
+	}
+	number := rawdb.ReadHeaderNumber(db, hash)
+	if number == nil {
+		return common.Hash{}, 0, false
+	}
+	return hash, *number, true
+}
+
+func (s *rawHierarchySource) CanonicalHash(number uint64, nodeCtx int) common.Hash {
+	db, err := s.dbForContext(nodeCtx)
+	if err != nil {
+		return common.Hash{}
+	}
+	return rawdb.ReadCanonicalHash(db, number)
+}
+
+func (s *rawHierarchySource) HeaderNumber(hash common.Hash, nodeCtx int) (uint64, bool) {
+	db, err := s.dbForContext(nodeCtx)
+	if err != nil {
+		return 0, false
+	}
+	number := rawdb.ReadHeaderNumber(db, hash)
+	if number == nil {
+		return 0, false
+	}
+	return *number, true
 }
 
 func (s *rawHierarchySource) ProofHeader(hash common.Hash) (*types.WorkObject, error) {

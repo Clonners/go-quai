@@ -108,6 +108,10 @@ func (p *PowShareDiffAndCount) RPCMarshal() map[string]interface{} {
 	return result
 }
 
+func (p *PowShareDiffAndCount) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.RPCMarshal())
+}
+
 func (p *PowShareDiffAndCount) UnmarshalJSON(data []byte) error {
 
 	var dec struct {

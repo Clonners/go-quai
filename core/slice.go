@@ -59,6 +59,9 @@ type CoreBackend interface {
 	GetPendingEtxsFromSub(hash common.Hash, location common.Location) (types.PendingEtxs, error)
 	NewGenesisPendingHeader(pendingHeader *types.WorkObject, domTerminus common.Hash, hash common.Hash) error
 	GetManifest(blockHash common.Hash) (types.BlockManifest, error)
+	GetHierarchyBlock(blockHash common.Hash, nodeCtx int) *types.WorkObject
+	GetHierarchyManifest(blockHash common.Hash, nodeCtx int) (types.BlockManifest, error)
+	GetNiPoPoWProofHeader(blockHash common.Hash) (*types.WorkObject, error)
 	GetPrimeBlock(blockHash common.Hash) *types.WorkObject
 	GetKQuaiAndUpdateBit(blockHash common.Hash) (*big.Int, uint8, error)
 	ReceiveMinedHeader(header *types.WorkObject) error
@@ -2416,6 +2419,74 @@ func (sl *Slice) GetPrimeBlock(blockHash common.Hash) *types.WorkObject {
 		return sl.domInterface.GetPrimeBlock(blockHash)
 	}
 	return nil
+}
+
+func (sl *Slice) GetHierarchyBlock(blockHash common.Hash, nodeCtx int) *types.WorkObject {
+	if blockHash == (common.Hash{}) {
+		return nil
+	}
+	if nodeCtx == sl.NodeCtx() {
+		if block := sl.hc.GetBlockByHash(blockHash); block != nil {
+			return block
+		}
+		return sl.hc.GetHeaderByHash(blockHash)
+	}
+	if nodeCtx < sl.NodeCtx() {
+		if sl.domInterface == nil {
+			return nil
+		}
+		return sl.domInterface.GetHierarchyBlock(blockHash, nodeCtx)
+	}
+	for _, sub := range sl.subInterface {
+		if sub == nil {
+			continue
+		}
+		if block := sub.GetHierarchyBlock(blockHash, nodeCtx); block != nil {
+			return block
+		}
+	}
+	return nil
+}
+
+func (sl *Slice) GetHierarchyManifest(blockHash common.Hash, nodeCtx int) (types.BlockManifest, error) {
+	if blockHash == (common.Hash{}) {
+		return nil, errors.New("missing hierarchy manifest block hash")
+	}
+	if nodeCtx == sl.NodeCtx() {
+		if block := sl.hc.GetBlockByHash(blockHash); block != nil && block.Manifest() != nil {
+			return append(types.BlockManifest(nil), block.Manifest()...), nil
+		}
+		if manifest := rawdb.ReadManifest(sl.sliceDb, blockHash); manifest != nil {
+			return append(types.BlockManifest(nil), manifest...), nil
+		}
+		return nil, errors.New("manifest not found in the disk")
+	}
+	if nodeCtx < sl.NodeCtx() {
+		if sl.domInterface == nil {
+			return nil, errors.New("missing dominant hierarchy interface")
+		}
+		return sl.domInterface.GetHierarchyManifest(blockHash, nodeCtx)
+	}
+	for _, sub := range sl.subInterface {
+		if sub == nil {
+			continue
+		}
+		manifest, err := sub.GetHierarchyManifest(blockHash, nodeCtx)
+		if err == nil && manifest != nil {
+			return manifest, nil
+		}
+	}
+	return nil, errors.New("missing subordinate hierarchy manifest")
+}
+
+func (sl *Slice) GetNiPoPoWProofHeader(blockHash common.Hash) (*types.WorkObject, error) {
+	if sl.NodeCtx() == common.PRIME_CTX {
+		return sl.hc.GetPrimeNiPoPoWProofHeader(blockHash)
+	}
+	if sl.domInterface == nil {
+		return nil, ErrNiPoPoWPrimeOnly
+	}
+	return sl.domInterface.GetNiPoPoWProofHeader(blockHash)
 }
 
 // AddGenesisHash appends the given hash to the genesis hash list

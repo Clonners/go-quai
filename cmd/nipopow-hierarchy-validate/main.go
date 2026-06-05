@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,24 +23,29 @@ import (
 	"github.com/dominant-strategies/go-quai/core/rawdb"
 	"github.com/dominant-strategies/go-quai/core/types"
 	"github.com/dominant-strategies/go-quai/ethdb"
+	"github.com/dominant-strategies/go-quai/internal/quaiapi"
 	"github.com/dominant-strategies/go-quai/log"
+	"github.com/dominant-strategies/go-quai/quaiclient"
+	"github.com/dominant-strategies/go-quai/rpc"
 	"github.com/dominant-strategies/go-quai/trie"
 )
 
 type cliConfig struct {
-	PrimeDBPath       string
-	PrimeAncientPath  string
-	RegionDBPath      string
-	RegionAncientPath string
-	ZoneDBPath        string
-	ZoneAncientPath   string
-	DBEngine          string
-	RegionLocation    common.Location
-	ZoneLocation      common.Location
-	OutPath           string
-	Timeout           time.Duration
-	Request           nipopow.HierarchyProofRequest
-	AutoSelect        autoSelectConfig
+	PrimeDBPath        string
+	PrimeAncientPath   string
+	RegionDBPath       string
+	RegionAncientPath  string
+	ZoneDBPath         string
+	ZoneAncientPath    string
+	DBEngine           string
+	RegionLocation     common.Location
+	ZoneLocation       common.Location
+	OutPath            string
+	Timeout            time.Duration
+	Request            nipopow.HierarchyProofRequest
+	AutoSelect         autoSelectConfig
+	TemplateShadowRPC  string
+	BlockTemplateOptIn bool
 }
 
 type autoSelectConfig struct {
@@ -63,33 +69,51 @@ type autoSelectStats struct {
 var ErrNoHierarchyCandidate = errors.New("no hierarchy proof candidate found")
 
 type hierarchyOutput struct {
-	StartedAtUTC       string                        `json:"startedAtUtc"`
-	FinishedAtUTC      string                        `json:"finishedAtUtc"`
-	ReadOnly           bool                          `json:"readOnly"`
-	LocalPathsRedacted bool                          `json:"localPathsRedacted"`
-	PrimeDBPath        string                        `json:"primeDbPath,omitempty"`
-	RegionDBPath       string                        `json:"regionDbPath,omitempty"`
-	ZoneDBPath         string                        `json:"zoneDbPath,omitempty"`
-	PrimeAncientPath   string                        `json:"primeAncientPath,omitempty"`
-	RegionAncientPath  string                        `json:"regionAncientPath,omitempty"`
-	ZoneAncientPath    string                        `json:"zoneAncientPath,omitempty"`
-	RegionLocation     string                        `json:"regionLocation"`
-	ZoneLocation       string                        `json:"zoneLocation"`
-	Request            nipopow.HierarchyProofRequest `json:"request"`
-	AutoSelect         bool                          `json:"autoSelect"`
-	AutoSelectStats    *autoSelectStats              `json:"autoSelectStats,omitempty"`
-	OpenElapsedMS      int64                         `json:"openElapsedMs,omitempty"`
-	CollectElapsedMS   int64                         `json:"collectElapsedMs,omitempty"`
-	ZoneNumber         uint64                        `json:"zoneNumber,omitempty"`
-	RegionNumber       uint64                        `json:"regionNumber,omitempty"`
-	PrimeTipNumber     uint64                        `json:"primeTipNumber,omitempty"`
-	PrimeProofHeaders  int                           `json:"primeProofHeaders,omitempty"`
-	RegionManifestLen  int                           `json:"regionManifestLen,omitempty"`
-	PrimeManifestLen   int                           `json:"primeManifestLen,omitempty"`
-	OK                 bool                          `json:"ok"`
-	Error              string                        `json:"error,omitempty"`
+	StartedAtUTC                        string                        `json:"startedAtUtc"`
+	FinishedAtUTC                       string                        `json:"finishedAtUtc"`
+	ReadOnly                            bool                          `json:"readOnly"`
+	LocalPathsRedacted                  bool                          `json:"localPathsRedacted"`
+	PrimeDBPath                         string                        `json:"primeDbPath,omitempty"`
+	RegionDBPath                        string                        `json:"regionDbPath,omitempty"`
+	ZoneDBPath                          string                        `json:"zoneDbPath,omitempty"`
+	PrimeAncientPath                    string                        `json:"primeAncientPath,omitempty"`
+	RegionAncientPath                   string                        `json:"regionAncientPath,omitempty"`
+	ZoneAncientPath                     string                        `json:"zoneAncientPath,omitempty"`
+	RegionLocation                      string                        `json:"regionLocation"`
+	ZoneLocation                        string                        `json:"zoneLocation"`
+	Request                             nipopow.HierarchyProofRequest `json:"request"`
+	AutoSelect                          bool                          `json:"autoSelect"`
+	AutoSelectStats                     *autoSelectStats              `json:"autoSelectStats,omitempty"`
+	TemplateShadow                      bool                          `json:"templateShadow"`
+	TemplateShadowRPC                   string                        `json:"templateShadowRpc,omitempty"`
+	TemplateLocation                    string                        `json:"templateLocation,omitempty"`
+	TemplateHash                        common.Hash                   `json:"templateHash,omitempty"`
+	TemplateSealHash                    common.Hash                   `json:"templateSealHash,omitempty"`
+	TemplateParentHash                  common.Hash                   `json:"templateParentHash,omitempty"`
+	TemplateRegionContextHash           common.Hash                   `json:"templateRegionContextHash,omitempty"`
+	TemplatePrimeContextHash            common.Hash                   `json:"templatePrimeContextHash,omitempty"`
+	TemplateNumber                      uint64                        `json:"templateNumber,omitempty"`
+	BlockTemplateOptIn                  bool                          `json:"blockTemplateOptIn"`
+	FetchBlockTemplateElapsedMS         int64                         `json:"fetchBlockTemplateElapsedMs,omitempty"`
+	BlockTemplateDefaultHadNiPoPoWProof bool                          `json:"blockTemplateDefaultHadNiPoPoWProof"`
+	BlockTemplateBuildElapsedMS         int64                         `json:"blockTemplateBuildElapsedMs,omitempty"`
+	BlockTemplateHasNiPoPoWProof        bool                          `json:"blockTemplateHasNiPoPoWProof,omitempty"`
+	BlockTemplateResponseKeys           []string                      `json:"blockTemplateResponseKeys,omitempty"`
+	BlockTemplateProofTemplateHash      common.Hash                   `json:"blockTemplateProofTemplateHash,omitempty"`
+	BlockTemplateProofPrimeProofHeaders int                           `json:"blockTemplateProofPrimeProofHeaders,omitempty"`
+	BlockTemplateResponse               map[string]interface{}        `json:"blockTemplateResponse,omitempty"`
+	OpenElapsedMS                       int64                         `json:"openElapsedMs,omitempty"`
+	FetchPendingElapsedMS               int64                         `json:"fetchPendingElapsedMs,omitempty"`
+	CollectElapsedMS                    int64                         `json:"collectElapsedMs,omitempty"`
+	ZoneNumber                          uint64                        `json:"zoneNumber,omitempty"`
+	RegionNumber                        uint64                        `json:"regionNumber,omitempty"`
+	PrimeTipNumber                      uint64                        `json:"primeTipNumber,omitempty"`
+	PrimeProofHeaders                   int                           `json:"primeProofHeaders,omitempty"`
+	RegionManifestLen                   int                           `json:"regionManifestLen,omitempty"`
+	PrimeManifestLen                    int                           `json:"primeManifestLen,omitempty"`
+	OK                                  bool                          `json:"ok"`
+	Error                               string                        `json:"error,omitempty"`
 }
-
 type rawHierarchySource struct {
 	prime   ethdb.Database
 	region  ethdb.Database
@@ -124,6 +148,7 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 		ZoneLocation:       cfg.ZoneLocation.Name(),
 		Request:            cfg.Request,
 		AutoSelect:         cfg.AutoSelect.Enabled,
+		BlockTemplateOptIn: cfg.BlockTemplateOptIn,
 	}
 	defer func() {
 		out.FinishedAtUTC = time.Now().UTC().Format(time.RFC3339Nano)
@@ -144,6 +169,62 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
 		defer cancel()
+	}
+	if cfg.TemplateShadowRPC != "" {
+		out.TemplateShadow = true
+		out.TemplateShadowRPC = sanitizeSourceURL(cfg.TemplateShadowRPC)
+		fetchStarted := time.Now()
+		pending, err := fetchPendingHeaderFromRPC(ctx, cfg.TemplateShadowRPC)
+		out.FetchPendingElapsedMS = time.Since(fetchStarted).Milliseconds()
+		if err != nil {
+			out.Error = fmt.Sprintf("fetch pending template: %v", err)
+			_ = writeFinalReport(stdout, cfg.OutPath, &out)
+			return 1
+		}
+		var baseBlockTemplate map[string]interface{}
+		if cfg.BlockTemplateOptIn {
+			fetchBlockTemplateStarted := time.Now()
+			baseBlockTemplate, err = fetchBlockTemplateFromRPC(ctx, cfg.TemplateShadowRPC)
+			out.FetchBlockTemplateElapsedMS = time.Since(fetchBlockTemplateStarted).Milliseconds()
+			if err != nil {
+				out.Error = fmt.Sprintf("fetch block template: %v", err)
+				_ = writeFinalReport(stdout, cfg.OutPath, &out)
+				return 1
+			}
+			_, out.BlockTemplateDefaultHadNiPoPoWProof = baseBlockTemplate["nipopowProof"]
+		}
+		collectStarted := time.Now()
+		result, err := collectTemplateShadowProof(ctx, source, pending, nipopow.TemplateHierarchyProofOptions{
+			M:      cfg.Request.M,
+			Limits: cfg.Request.Limits,
+		})
+		out.CollectElapsedMS = time.Since(collectStarted).Milliseconds()
+		if err != nil {
+			out.Error = err.Error()
+			_ = writeFinalReport(stdout, cfg.OutPath, &out)
+			return 1
+		}
+		populateTemplateShadowOutput(&out, pending, result)
+		if cfg.BlockTemplateOptIn {
+			buildStarted := time.Now()
+			response, err := buildBlockTemplateOptInResponse(ctx, source, pending, nipopow.TemplateHierarchyProofOptions{
+				M:           cfg.Request.M,
+				PrimeAnchor: cfg.Request.PrimeAnchor,
+				Limits:      cfg.Request.Limits,
+			}, baseBlockTemplate)
+			out.BlockTemplateBuildElapsedMS = time.Since(buildStarted).Milliseconds()
+			if err != nil {
+				out.Error = fmt.Sprintf("block template opt-in: %v", err)
+				_ = writeFinalReport(stdout, cfg.OutPath, &out)
+				return 1
+			}
+			populateBlockTemplateOptInOutput(&out, response)
+		}
+		if err := writeFinalReport(stdout, cfg.OutPath, &out); err != nil {
+			fmt.Fprintf(stderr, "error writing report: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 	if cfg.AutoSelect.Enabled {
 		selected, stats, err := selectHierarchyProofRequest(ctx, source, autoSelectConfig{
@@ -184,6 +265,118 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+func fetchPendingHeaderFromRPC(ctx context.Context, rawURL string) (*types.WorkObject, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, errors.New("empty pending template RPC URL")
+	}
+	client, err := rpc.DialContext(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	pending, err := quaiclient.NewClient(client).GetPendingHeader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if pending == nil {
+		return nil, errors.New("pending header RPC returned nil")
+	}
+	return pending, nil
+}
+
+func fetchBlockTemplateFromRPC(ctx context.Context, rawURL string) (map[string]interface{}, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, errors.New("empty block template RPC URL")
+	}
+	client, err := rpc.DialContext(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	var template map[string]interface{}
+	if err := client.CallContext(ctx, &template, "quai_getBlockTemplate", map[string]interface{}{"rules": []string{"kawpow"}}); err != nil {
+		return nil, err
+	}
+	if template == nil {
+		return nil, errors.New("block template RPC returned nil")
+	}
+	return template, nil
+}
+
+func collectTemplateShadowProof(ctx context.Context, source nipopow.HierarchyProofSource, pending *types.WorkObject, opts nipopow.TemplateHierarchyProofOptions) (*nipopow.TemplateHierarchyProof, error) {
+	return nipopow.BuildTemplateHierarchyProofWithContext(ctx, source, pending, opts)
+}
+
+func populateTemplateShadowOutput(out *hierarchyOutput, pending *types.WorkObject, result *nipopow.TemplateHierarchyProof) {
+	if out == nil || pending == nil || result == nil || result.Proof == nil {
+		return
+	}
+	out.Request = result.Request
+	out.TemplateLocation = pending.Location().Name()
+	out.TemplateHash = result.TemplateHash
+	out.TemplateSealHash = result.TemplateSealHash
+	out.TemplateParentHash = result.TemplateParentHash
+	out.TemplateRegionContextHash = pending.ParentHash(common.REGION_CTX)
+	out.TemplatePrimeContextHash = pending.ParentHash(common.PRIME_CTX)
+	out.TemplateNumber = pending.NumberU64(common.ZONE_CTX)
+	out.ZoneNumber = result.Proof.ZoneHeader.NumberU64(common.ZONE_CTX)
+	out.RegionNumber = result.Proof.RegionHeader.NumberU64(common.REGION_CTX)
+	out.PrimeTipNumber = result.Proof.PrimeHeader.NumberU64(common.PRIME_CTX)
+	out.PrimeProofHeaders = len(result.Proof.PrimeProof.Headers)
+	out.RegionManifestLen = len(result.Proof.RegionHeader.Manifest())
+	out.PrimeManifestLen = len(result.Proof.PrimeHeader.Manifest())
+	out.OK = true
+}
+
+func buildBlockTemplateOptInResponse(ctx context.Context, source nipopow.HierarchyProofSource, pending *types.WorkObject, opts nipopow.TemplateHierarchyProofOptions, baseTemplate map[string]interface{}) (map[string]interface{}, error) {
+	template := make(map[string]interface{}, len(baseTemplate)+1)
+	if baseTemplate != nil {
+		for key, value := range baseTemplate {
+			template[key] = value
+		}
+		if _, ok := template["nipopowProof"]; ok {
+			return nil, errors.New("default block template unexpectedly already contains nipopowProof")
+		}
+	} else {
+		var err error
+		template, err = quaiapi.MarshalAuxPowTemplate(pending, &quaiapi.BlockTemplateRequest{
+			NiPoPoWProof:       true,
+			NiPoPoWProofM:      opts.M,
+			NiPoPoWPrimeAnchor: opts.PrimeAnchor,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	proof, err := collectTemplateShadowProof(ctx, source, pending, opts)
+	if err != nil {
+		return nil, err
+	}
+	template["nipopowProof"] = proof
+	return template, nil
+}
+
+func populateBlockTemplateOptInOutput(out *hierarchyOutput, response map[string]interface{}) {
+	if out == nil || response == nil {
+		return
+	}
+	out.BlockTemplateResponse = response
+	out.BlockTemplateResponseKeys = make([]string, 0, len(response))
+	for key := range response {
+		out.BlockTemplateResponseKeys = append(out.BlockTemplateResponseKeys, key)
+	}
+	sort.Strings(out.BlockTemplateResponseKeys)
+	proof, ok := response["nipopowProof"].(*nipopow.TemplateHierarchyProof)
+	if !ok || proof == nil {
+		return
+	}
+	out.BlockTemplateHasNiPoPoWProof = true
+	out.BlockTemplateProofTemplateHash = proof.TemplateHash
+	if proof.Proof != nil {
+		out.BlockTemplateProofPrimeProofHeaders = len(proof.Proof.PrimeProof.Headers)
+	}
+}
+
 func parseCLI(args []string, stderr io.Writer) (cliConfig, error) {
 	cfg := cliConfig{
 		RegionLocation: common.Location{0},
@@ -211,6 +404,8 @@ func parseCLI(args []string, stderr io.Writer) (cliConfig, error) {
 	fs.StringVar(&regionHash, "region-hash", "", "Region header hash to bind into the Prime manifest")
 	fs.StringVar(&primeAnchor, "prime-anchor", "", "Prime proof anchor hash")
 	fs.StringVar(&primeTip, "prime-tip", "", "Prime manifest carrier / proof tip hash")
+	fs.StringVar(&cfg.TemplateShadowRPC, "template-shadow-rpc", "", "Fetch quai_getPendingHeader from this RPC and validate the pending template's shadow hierarchy proof")
+	fs.BoolVar(&cfg.BlockTemplateOptIn, "block-template-optin", false, "Also build a snapshot-backed quai_getBlockTemplate response with explicit nipopowProof opt-in")
 	fs.BoolVar(&cfg.AutoSelect.Enabled, "auto-select", false, "Derive Zone/Region/Prime hashes by scanning read-only manifests instead of requiring explicit hashes")
 	fs.Uint64Var(&cfg.AutoSelect.RegionWindow, "auto.region-window", nipopow.DefaultMaxProofChainLength, "Maximum canonical Region blocks to scan backwards for a Zone manifest entry")
 	fs.Uint64Var(&cfg.AutoSelect.PrimeWindow, "auto.prime-window", nipopow.DefaultMaxProofChainLength, "Maximum canonical Prime blocks to scan backwards for a Region manifest entry")
@@ -242,6 +437,17 @@ func parseCLI(args []string, stderr io.Writer) (cliConfig, error) {
 	}
 	if cfg.ZoneAncientPath == "" {
 		cfg.ZoneAncientPath = defaultAncientPath(cfg.ZoneDBPath)
+	}
+	if cfg.AutoSelect.Enabled && strings.TrimSpace(cfg.TemplateShadowRPC) != "" {
+		return cfg, errors.New("--auto-select cannot be combined with --template-shadow-rpc")
+	}
+	if cfg.BlockTemplateOptIn && strings.TrimSpace(cfg.TemplateShadowRPC) == "" {
+		return cfg, errors.New("--block-template-optin requires --template-shadow-rpc")
+	}
+	if strings.TrimSpace(cfg.TemplateShadowRPC) != "" {
+		cfg.TemplateShadowRPC = strings.TrimSpace(cfg.TemplateShadowRPC)
+		cfg.AutoSelect.Limits = cfg.Request.Limits
+		return cfg, nil
 	}
 	if cfg.AutoSelect.Enabled {
 		cfg.AutoSelect.Limits = cfg.Request.Limits
@@ -292,6 +498,17 @@ func redactLocalPath(path string) string {
 		return "<redacted>"
 	}
 	return base
+}
+
+func sanitizeSourceURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func parseLocation(spec string, wantCtx int) (common.Location, error) {

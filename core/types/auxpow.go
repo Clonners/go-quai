@@ -680,6 +680,10 @@ func (ap *AuxPow) RPCMarshal() map[string]interface{} {
 	}
 }
 
+func (ap *AuxPow) MarshalJSON() ([]byte, error) {
+	return json.Marshal(ap.RPCMarshal())
+}
+
 // UnmarshalJSON implements json.Unmarshaler for AuxPow
 func (ap *AuxPow) UnmarshalJSON(data []byte) error {
 	var dec struct {

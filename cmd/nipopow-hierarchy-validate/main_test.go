@@ -118,6 +118,130 @@ func TestParseCLIAcceptsAutoSelectWithoutHashes(t *testing.T) {
 	}
 }
 
+func TestParseCLIAcceptsTemplateShadowRPCWithoutExplicitHashes(t *testing.T) {
+	cfg, err := parseCLI([]string{
+		"--prime.db", "/tmp/prime",
+		"--region.db", "/tmp/region",
+		"--zone.db", "/tmp/zone",
+		"--template-shadow-rpc", "https://zone.example.invalid",
+		"--block-template-optin",
+		"--m", "3",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("expected template shadow parse success without explicit hashes: %v", err)
+	}
+	if cfg.TemplateShadowRPC != "https://zone.example.invalid" {
+		t.Fatalf("template shadow rpc flag not parsed: %+v", cfg)
+	}
+	if !cfg.BlockTemplateOptIn {
+		t.Fatalf("block template opt-in flag not parsed: %+v", cfg)
+	}
+	if cfg.Request.M != 3 {
+		t.Fatalf("m not preserved for template shadow mode: %+v", cfg.Request)
+	}
+}
+
+func TestBuildBlockTemplateOptInResponseAttachesProof(t *testing.T) {
+	source := newAutoSelectTestSource(t)
+	primeAnchor := cliTestPrimeBlock(t, 1, nil, nil)
+	primeTip := cliTestPrimeBlock(t, 2, primeAnchor, nil)
+	zone := cliTestHierarchyHeader(t, common.ZONE_CTX, common.Location{0, 0}, 100, primeAnchor.Hash(), nil)
+	region := cliTestHierarchyHeader(t, common.REGION_CTX, common.Location{0}, 50, primeAnchor.Hash(), types.BlockManifest{zone.Hash()})
+	primeTip.Body().SetManifest(types.BlockManifest{region.Hash()})
+	setCLITestManifestCommitment(t, primeTip, common.PRIME_CTX)
+
+	source.add(common.PRIME_CTX, 1, primeAnchor, nil)
+	source.add(common.PRIME_CTX, 2, primeTip, primeTip.Manifest())
+	source.add(common.REGION_CTX, 50, region, region.Manifest())
+	source.add(common.ZONE_CTX, 100, zone, nil)
+
+	pending := cliTestHierarchyHeader(t, common.ZONE_CTX, common.Location{0, 0}, 101, primeAnchor.Hash(), nil)
+	pending.SetParentHash(zone.Hash(), common.ZONE_CTX)
+	pending.SetParentHash(region.Hash(), common.REGION_CTX)
+	pending.SetParentHash(primeTip.Hash(), common.PRIME_CTX)
+	pending.WorkObjectHeader().SetAuxPow(cliTestAuxPow(types.SHA_BCH))
+	pending.WorkObjectHeader().SetHeaderHash(pending.Header().Hash())
+
+	response, err := buildBlockTemplateOptInResponse(context.Background(), source, pending, nipopow.TemplateHierarchyProofOptions{M: 1}, nil)
+	if err != nil {
+		t.Fatalf("expected block template opt-in response: %v", err)
+	}
+	if _, ok := response["nipopowProof"]; !ok {
+		t.Fatalf("expected nipopowProof in response: %+v", response)
+	}
+	if _, ok := response["coinb1"]; !ok {
+		t.Fatalf("expected normal block template fields in response: %+v", response)
+	}
+}
+
+func TestBuildBlockTemplateOptInResponseUsesFetchedTemplateWhenPendingHasNoAuxPow(t *testing.T) {
+	source := newAutoSelectTestSource(t)
+	primeAnchor := cliTestPrimeBlock(t, 1, nil, nil)
+	primeTip := cliTestPrimeBlock(t, 2, primeAnchor, nil)
+	zone := cliTestHierarchyHeader(t, common.ZONE_CTX, common.Location{0, 0}, 100, primeAnchor.Hash(), nil)
+	region := cliTestHierarchyHeader(t, common.REGION_CTX, common.Location{0}, 50, primeAnchor.Hash(), types.BlockManifest{zone.Hash()})
+	primeTip.Body().SetManifest(types.BlockManifest{region.Hash()})
+	setCLITestManifestCommitment(t, primeTip, common.PRIME_CTX)
+
+	source.add(common.PRIME_CTX, 1, primeAnchor, nil)
+	source.add(common.PRIME_CTX, 2, primeTip, primeTip.Manifest())
+	source.add(common.REGION_CTX, 50, region, region.Manifest())
+	source.add(common.ZONE_CTX, 100, zone, nil)
+
+	pending := cliTestHierarchyHeader(t, common.ZONE_CTX, common.Location{0, 0}, 101, primeAnchor.Hash(), nil)
+	pending.SetParentHash(zone.Hash(), common.ZONE_CTX)
+	pending.SetParentHash(region.Hash(), common.REGION_CTX)
+	pending.SetParentHash(primeTip.Hash(), common.PRIME_CTX)
+	pending.WorkObjectHeader().SetHeaderHash(pending.Header().Hash())
+
+	baseTemplate := map[string]interface{}{"coinb1": "default-template", "quaiheight": float64(101)}
+	response, err := buildBlockTemplateOptInResponse(context.Background(), source, pending, nipopow.TemplateHierarchyProofOptions{M: 1}, baseTemplate)
+	if err != nil {
+		t.Fatalf("expected fetched block template to be used when pending has no auxpow: %v", err)
+	}
+	if response["coinb1"] != "default-template" {
+		t.Fatalf("expected fetched template fields preserved: %+v", response)
+	}
+	if _, ok := response["nipopowProof"]; !ok {
+		t.Fatalf("expected nipopowProof in response: %+v", response)
+	}
+	if _, ok := baseTemplate["nipopowProof"]; ok {
+		t.Fatalf("base default template should not be mutated with proof: %+v", baseTemplate)
+	}
+}
+
+func TestCollectTemplateShadowProofDerivesReportFromPendingHeader(t *testing.T) {
+	source := newAutoSelectTestSource(t)
+	primeAnchor := cliTestPrimeBlock(t, 1, nil, nil)
+	primeTip := cliTestPrimeBlock(t, 2, primeAnchor, nil)
+	zone := cliTestHierarchyHeader(t, common.ZONE_CTX, common.Location{0, 0}, 100, primeAnchor.Hash(), nil)
+	region := cliTestHierarchyHeader(t, common.REGION_CTX, common.Location{0}, 50, primeAnchor.Hash(), types.BlockManifest{zone.Hash()})
+	primeTip.Body().SetManifest(types.BlockManifest{region.Hash()})
+	setCLITestManifestCommitment(t, primeTip, common.PRIME_CTX)
+
+	source.add(common.PRIME_CTX, 1, primeAnchor, nil)
+	source.add(common.PRIME_CTX, 2, primeTip, primeTip.Manifest())
+	source.add(common.REGION_CTX, 50, region, region.Manifest())
+	source.add(common.ZONE_CTX, 100, zone, nil)
+
+	pending := cliTestHierarchyHeader(t, common.ZONE_CTX, common.Location{0, 0}, 101, primeAnchor.Hash(), nil)
+	pending.SetParentHash(zone.Hash(), common.ZONE_CTX)
+	pending.SetParentHash(region.Hash(), common.REGION_CTX)
+	pending.SetParentHash(primeTip.Hash(), common.PRIME_CTX)
+	pending.WorkObjectHeader().SetHeaderHash(pending.Header().Hash())
+
+	result, err := collectTemplateShadowProof(context.Background(), source, pending, nipopow.TemplateHierarchyProofOptions{M: 1})
+	if err != nil {
+		t.Fatalf("expected template shadow proof to build: %v", err)
+	}
+	if result.Request.ZoneHash != zone.Hash() || result.Request.RegionHash != region.Hash() || result.Request.PrimeTip != primeTip.Hash() {
+		t.Fatalf("unexpected derived request: %+v", result.Request)
+	}
+	if result.TemplateParentHash != zone.Hash() {
+		t.Fatalf("unexpected template parent: got %s want %s", result.TemplateParentHash, zone.Hash())
+	}
+}
+
 func TestSelectHierarchyProofRequestDerivesRecentTuple(t *testing.T) {
 	source := newAutoSelectTestSource(t)
 	prime10 := cliTestHierarchyHeader(t, common.PRIME_CTX, common.Location{}, 10, common.Hash{}, nil)
@@ -325,6 +449,28 @@ func (s *autoSelectTestSource) Manifest(hash common.Hash, nodeCtx int) (types.Bl
 	return append(types.BlockManifest(nil), manifest...), nil
 }
 
+func (s *autoSelectTestSource) ProofHeader(hash common.Hash) (*types.WorkObject, error) {
+	return s.Header(hash, common.PRIME_CTX)
+}
+
+func cliTestPrimeBlock(t *testing.T, number uint64, parent *types.WorkObject, interlinks common.Hashes) *types.WorkObject {
+	t.Helper()
+	wo := types.EmptyWorkObject(common.PRIME_CTX)
+	wo.WorkObjectHeader().SetNumber(new(big.Int).SetUint64(number))
+	wo.WorkObjectHeader().SetPrimeTerminusNumber(new(big.Int).SetUint64(number))
+	wo.WorkObjectHeader().SetTime(number)
+	wo.Header().SetNumber(new(big.Int).SetUint64(number), common.PRIME_CTX)
+	wo.Header().SetParentDeltaEntropy(big.NewInt(1), common.PRIME_CTX)
+	wo.Header().SetExpansionNumber(0)
+	if parent != nil {
+		wo.SetParentHash(parent.Hash(), common.PRIME_CTX)
+	}
+	wo.Body().SetInterlinkHashes(interlinks)
+	wo.Header().SetInterlinkRootHash(types.DeriveSha(interlinks, trie.NewStackTrie(nil)))
+	wo.WorkObjectHeader().SetHeaderHash(wo.Header().Hash())
+	return wo
+}
+
 func cliTestHierarchyHeader(t *testing.T, nodeCtx int, location common.Location, number uint64, primeTerminus common.Hash, manifest types.BlockManifest) *types.WorkObject {
 	t.Helper()
 	wo := types.EmptyWorkObject(nodeCtx)
@@ -332,6 +478,10 @@ func cliTestHierarchyHeader(t *testing.T, nodeCtx int, location common.Location,
 	wo.WorkObjectHeader().SetNumber(new(big.Int).SetUint64(number))
 	wo.WorkObjectHeader().SetPrimeTerminusNumber(new(big.Int).SetUint64(1))
 	wo.WorkObjectHeader().SetTime(number)
+	wo.WorkObjectHeader().SetDifficulty(big.NewInt(1))
+	wo.WorkObjectHeader().SetShaDiffAndCount(types.NewPowShareDiffAndCount(big.NewInt(1), big.NewInt(0), big.NewInt(0)))
+	wo.WorkObjectHeader().SetScryptDiffAndCount(types.NewPowShareDiffAndCount(big.NewInt(1), big.NewInt(0), big.NewInt(0)))
+	wo.WorkObjectHeader().SetKawpowDifficulty(big.NewInt(1))
 	if nodeCtx < common.ZONE_CTX {
 		wo.Header().SetNumber(new(big.Int).SetUint64(number), nodeCtx)
 	}
@@ -339,6 +489,24 @@ func cliTestHierarchyHeader(t *testing.T, nodeCtx int, location common.Location,
 	wo.Body().SetManifest(manifest)
 	setCLITestManifestCommitment(t, wo, nodeCtx)
 	return wo
+}
+
+func cliTestAuxPow(powID types.PowID) *types.AuxPow {
+	var prevBlock [32]byte
+	prevBlock[0] = 1
+	var merkleRoot [32]byte
+	merkleRoot[0] = 2
+	auxMerkleRoot := common.Hash{0x03}
+	coinbaseOut := []byte{0x00, 0x00, 0x00, 0x00, 0x00}
+	tx := types.NewAuxPowCoinbaseTx(powID, 101, coinbaseOut, auxMerkleRoot, 1234567890)
+	return types.NewAuxPow(
+		powID,
+		types.NewBlockHeader(powID, 0x20000000, prevBlock, merkleRoot, 1234567890, 0x1d00ffff, 0, 101),
+		nil,
+		nil,
+		nil,
+		tx,
+	)
 }
 
 func setCLITestManifestCommitment(t *testing.T, wo *types.WorkObject, nodeCtx int) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -62,30 +63,31 @@ type autoSelectStats struct {
 var ErrNoHierarchyCandidate = errors.New("no hierarchy proof candidate found")
 
 type hierarchyOutput struct {
-	StartedAtUTC      string                        `json:"startedAtUtc"`
-	FinishedAtUTC     string                        `json:"finishedAtUtc"`
-	ReadOnly          bool                          `json:"readOnly"`
-	PrimeDBPath       string                        `json:"primeDbPath,omitempty"`
-	RegionDBPath      string                        `json:"regionDbPath,omitempty"`
-	ZoneDBPath        string                        `json:"zoneDbPath,omitempty"`
-	PrimeAncientPath  string                        `json:"primeAncientPath,omitempty"`
-	RegionAncientPath string                        `json:"regionAncientPath,omitempty"`
-	ZoneAncientPath   string                        `json:"zoneAncientPath,omitempty"`
-	RegionLocation    string                        `json:"regionLocation"`
-	ZoneLocation      string                        `json:"zoneLocation"`
-	Request           nipopow.HierarchyProofRequest `json:"request"`
-	AutoSelect        bool                          `json:"autoSelect"`
-	AutoSelectStats   *autoSelectStats              `json:"autoSelectStats,omitempty"`
-	OpenElapsedMS     int64                         `json:"openElapsedMs,omitempty"`
-	CollectElapsedMS  int64                         `json:"collectElapsedMs,omitempty"`
-	ZoneNumber        uint64                        `json:"zoneNumber,omitempty"`
-	RegionNumber      uint64                        `json:"regionNumber,omitempty"`
-	PrimeTipNumber    uint64                        `json:"primeTipNumber,omitempty"`
-	PrimeProofHeaders int                           `json:"primeProofHeaders,omitempty"`
-	RegionManifestLen int                           `json:"regionManifestLen,omitempty"`
-	PrimeManifestLen  int                           `json:"primeManifestLen,omitempty"`
-	OK                bool                          `json:"ok"`
-	Error             string                        `json:"error,omitempty"`
+	StartedAtUTC       string                        `json:"startedAtUtc"`
+	FinishedAtUTC      string                        `json:"finishedAtUtc"`
+	ReadOnly           bool                          `json:"readOnly"`
+	LocalPathsRedacted bool                          `json:"localPathsRedacted"`
+	PrimeDBPath        string                        `json:"primeDbPath,omitempty"`
+	RegionDBPath       string                        `json:"regionDbPath,omitempty"`
+	ZoneDBPath         string                        `json:"zoneDbPath,omitempty"`
+	PrimeAncientPath   string                        `json:"primeAncientPath,omitempty"`
+	RegionAncientPath  string                        `json:"regionAncientPath,omitempty"`
+	ZoneAncientPath    string                        `json:"zoneAncientPath,omitempty"`
+	RegionLocation     string                        `json:"regionLocation"`
+	ZoneLocation       string                        `json:"zoneLocation"`
+	Request            nipopow.HierarchyProofRequest `json:"request"`
+	AutoSelect         bool                          `json:"autoSelect"`
+	AutoSelectStats    *autoSelectStats              `json:"autoSelectStats,omitempty"`
+	OpenElapsedMS      int64                         `json:"openElapsedMs,omitempty"`
+	CollectElapsedMS   int64                         `json:"collectElapsedMs,omitempty"`
+	ZoneNumber         uint64                        `json:"zoneNumber,omitempty"`
+	RegionNumber       uint64                        `json:"regionNumber,omitempty"`
+	PrimeTipNumber     uint64                        `json:"primeTipNumber,omitempty"`
+	PrimeProofHeaders  int                           `json:"primeProofHeaders,omitempty"`
+	RegionManifestLen  int                           `json:"regionManifestLen,omitempty"`
+	PrimeManifestLen   int                           `json:"primeManifestLen,omitempty"`
+	OK                 bool                          `json:"ok"`
+	Error              string                        `json:"error,omitempty"`
 }
 
 type rawHierarchySource struct {
@@ -109,18 +111,19 @@ func runCLI(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	out := hierarchyOutput{
-		StartedAtUTC:      time.Now().UTC().Format(time.RFC3339Nano),
-		ReadOnly:          true,
-		PrimeDBPath:       cfg.PrimeDBPath,
-		RegionDBPath:      cfg.RegionDBPath,
-		ZoneDBPath:        cfg.ZoneDBPath,
-		PrimeAncientPath:  cfg.PrimeAncientPath,
-		RegionAncientPath: cfg.RegionAncientPath,
-		ZoneAncientPath:   cfg.ZoneAncientPath,
-		RegionLocation:    cfg.RegionLocation.Name(),
-		ZoneLocation:      cfg.ZoneLocation.Name(),
-		Request:           cfg.Request,
-		AutoSelect:        cfg.AutoSelect.Enabled,
+		StartedAtUTC:       time.Now().UTC().Format(time.RFC3339Nano),
+		ReadOnly:           true,
+		LocalPathsRedacted: true,
+		PrimeDBPath:        redactLocalPath(cfg.PrimeDBPath),
+		RegionDBPath:       redactLocalPath(cfg.RegionDBPath),
+		ZoneDBPath:         redactLocalPath(cfg.ZoneDBPath),
+		PrimeAncientPath:   redactLocalPath(cfg.PrimeAncientPath),
+		RegionAncientPath:  redactLocalPath(cfg.RegionAncientPath),
+		ZoneAncientPath:    redactLocalPath(cfg.ZoneAncientPath),
+		RegionLocation:     cfg.RegionLocation.Name(),
+		ZoneLocation:       cfg.ZoneLocation.Name(),
+		Request:            cfg.Request,
+		AutoSelect:         cfg.AutoSelect.Enabled,
 	}
 	defer func() {
 		out.FinishedAtUTC = time.Now().UTC().Format(time.RFC3339Nano)
@@ -261,14 +264,34 @@ func parseCLI(args []string, stderr io.Writer) (cliConfig, error) {
 }
 
 func parseRequiredHash(name string, spec string) (common.Hash, error) {
-	if strings.TrimSpace(spec) == "" {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
 		return common.Hash{}, fmt.Errorf("missing required --%s", name)
 	}
-	hash := common.HexToHash(spec)
+	if !strings.HasPrefix(spec, "0x") || len(spec) != 2+common.HashLength*2 {
+		return common.Hash{}, fmt.Errorf("--%s must be a 0x-prefixed 32-byte hash", name)
+	}
+	raw, err := hex.DecodeString(spec[2:])
+	if err != nil || len(raw) != common.HashLength {
+		return common.Hash{}, fmt.Errorf("--%s must be a 0x-prefixed 32-byte hash", name)
+	}
+	hash := common.BytesToHash(raw)
 	if hash == (common.Hash{}) {
 		return common.Hash{}, fmt.Errorf("invalid zero --%s", name)
 	}
 	return hash, nil
+}
+
+func redactLocalPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	base := filepath.Base(path)
+	if base == "." || base == string(filepath.Separator) {
+		return "<redacted>"
+	}
+	return base
 }
 
 func parseLocation(spec string, wantCtx int) (common.Location, error) {

@@ -62,6 +62,30 @@ func TestParseCLIAcceptsExplicitHierarchyInputs(t *testing.T) {
 	}
 }
 
+func TestParseCLIRejectsShortHashInputs(t *testing.T) {
+	_, err := parseCLI([]string{
+		"--prime.db", "/tmp/prime",
+		"--region.db", "/tmp/region",
+		"--zone.db", "/tmp/zone",
+		"--zone-hash", "0x01",
+		"--region-hash", common.HexToHash("0x02").Hex(),
+		"--prime-anchor", common.HexToHash("0x03").Hex(),
+		"--prime-tip", common.HexToHash("0x04").Hex(),
+	}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected short hash to be rejected")
+	}
+}
+
+func TestRedactLocalPathKeepsReportsLocalPathSafe(t *testing.T) {
+	if got := redactLocalPath("/home/user/private/chaindata"); got != "chaindata" {
+		t.Fatalf("unexpected redacted path: %s", got)
+	}
+	if got := redactLocalPath(""); got != "" {
+		t.Fatalf("empty path should stay empty, got %q", got)
+	}
+}
+
 func TestParseLocation(t *testing.T) {
 	region, err := parseLocation("0", common.REGION_CTX)
 	if err != nil {

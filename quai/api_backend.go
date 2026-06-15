@@ -817,6 +817,22 @@ func (b *QuaiAPIBackend) GetNiPoPoWProof(ctx context.Context, anchor common.Hash
 	return b.quai.core.GetNiPoPoWProof(ctx, anchor, tip, m)
 }
 
+func (b *QuaiAPIBackend) GetNiPoPoWProofHeader(blockHash common.Hash) (*types.WorkObject, error) {
+	return b.quai.core.GetNiPoPoWProofHeader(blockHash)
+}
+
+func (b *QuaiAPIBackend) GetHierarchyBlock(blockHash common.Hash, nodeCtx int) *types.WorkObject {
+	return b.quai.core.GetHierarchyBlock(blockHash, nodeCtx)
+}
+
+func (b *QuaiAPIBackend) GetHierarchyManifest(blockHash common.Hash, nodeCtx int) (types.BlockManifest, error) {
+	return b.quai.core.GetHierarchyManifest(blockHash, nodeCtx)
+}
+
+func (b *QuaiAPIBackend) GetBlockTemplateNiPoPoWProof(ctx context.Context, pending *types.WorkObject, opts nipopow.TemplateHierarchyProofOptions) (*nipopow.TemplateHierarchyProof, error) {
+	return b.quai.core.GetBlockTemplateNiPoPoWProof(ctx, pending, opts)
+}
+
 func (b *QuaiAPIBackend) GetHeaderByNumber(number uint64) *types.WorkObject {
 	return b.quai.core.GetHeaderByNumber(number)
 }

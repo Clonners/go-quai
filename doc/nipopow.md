@@ -2,446 +2,271 @@
 
 ## Status
 
-This document describes the staged NiPoPoW work for `go-quai`.
+This document describes a staged, read-only NiPoPoW implementation for `go-quai`.
 
-Current stage: Prime-chain proof foundation plus read-only hierarchy wrapper prototype.
+The current stack adds:
 
-The current implementation is intentionally read-only and non-consensus. It does not change block validation rules, fork choice, mining behavior, or persisted chain state. Its purpose is to add the Prime-chain proof primitives and Zone/Region -> Prime wrapper verifier shape needed before Zone mining templates can be verified by external pools without trusting the node that produced the template.
+1. Prime-chain NiPoPoW proof primitives.
+2. A Zone/Region -> Prime manifest wrapper verifier.
+3. A pending-template proof source for the already-persisted hierarchy context behind a Zone mining template.
+4. Explicit opt-in `nipopowProof` delivery in `quai_getBlockTemplate`.
+5. Offline client-side verification helpers for pools/miners.
+6. Local opt-in gate/proxy tooling for shadow-mode integration.
+
+The implementation is intentionally non-consensus. It does not change block validation rules, fork choice, default mining behavior, or persisted chain state.
 
 ## Problem
 
-Mining pools currently need to trust or whitelist nodes that provide block templates. A pool receiving a Zone block template from an untrusted node needs compact evidence that the template is anchored into the canonical Quai hierarchy and backed by sufficient Prime-chain work.
+Mining pools currently need to trust or whitelist nodes that provide block templates. A pool receiving a Zone block template from an untrusted node needs compact evidence that the template is backed by already-persisted Quai hierarchy context and sufficient Prime-chain work.
 
 The desired verification shape is:
 
 ```text
 Zone block template/header
-  -> committed/linked by Zone/Region manifest context
+  -> backed by a persisted Zone context
+Zone context
+  -> included in a Region manifest
 Region context
-  -> committed/linked by Region/Prime manifest context
-Prime context
-  -> proven by compact Prime NiPoPoW proof
-Sufficient Prime-chain work according to the verifier policy
-```
-
-The first implementation stage provided the bottom layer:
-
-```text
-Prime context
-  -> compact Prime NiPoPoW proof
-```
-
-The current hierarchy wrapper prototype adds the next verification shape in-memory, without DB/RPC/miner wiring:
-
-```text
-Zone header hash
-  -> included in Region manifest
-Region header hash
-  -> included in Prime manifest
+  -> included in a Prime manifest
 Prime manifest carrier
-  -> tip of compact Prime NiPoPoW proof
+  -> tip of a compact Prime NiPoPoW proof
+Prime proof
+  -> verified by the pool/client under its local policy
 ```
 
-Mining-template integration is still a later stage.
+Important caveat: the proof backs the already-selected persisted context behind a pending Zone template. It does not claim that the unmined template itself is already manifest-included.
 
 ## Goals
 
-- Add a compact Prime-chain proof representation.
-- Build Prime proofs from already-persisted canonical chain data.
-- Verify proof structure, header/body binding, interlink roots, linear suffixes, and interlink jumps.
-- Verify proof-of-work/rank when the caller supplies the consensus PoW hash function.
-- Bound public proof generation with context cancellation and explicit limits.
-- Keep the implementation read-only and non-consensus.
-- Add a self-contained Zone/Region -> Prime wrapper verifier prototype.
-- Provide a clean foundation for later block-template and pool-verifier integration.
+- Add compact Prime-chain proof representation and verification.
+- Build proofs from already-persisted canonical chain data.
+- Verify header/body binding, interlink roots, linear suffixes, interlink jumps, and wrapper manifest membership.
+- Keep proof building read-only and context-cancellable.
+- Keep public block-template behavior unchanged unless the caller explicitly opts in.
+- Let a pool/client verify an opted-in template artifact offline, without DB access and without trusting the producing node.
+- Bound RPC-exposed proof generation by timeout, proof size, proof length, manifest size, and `m` policy.
 
-## Non-goals for the current stage
+## Non-goals
 
 - No consensus-rule changes.
 - No fork-choice changes.
-- No block-template behavior changes.
+- No default block-template schema changes.
 - No DB writes or recalculation of persisted interlinks.
-- No claim that Zone templates are trustlessly verifiable yet.
-- No public verifier RPC that could be mistaken for a canonical truth oracle.
+- No public generic proof-verifier RPC that could be mistaken for a canonical truth oracle.
+- No claim of complete mainnet-correctness until protocol/QIP semantics are reviewed by the Quai team.
 
-## Current code layout
+## Code layout
 
 - `core/nipopow/proof.go`
   - `Proof`
   - `VerifyPrimeProof`
-  - structural checks for header connectivity and interlink commitments
+  - structural Prime proof checks
 
 - `core/nipopow/build.go`
   - `PrimeProofSource`
   - `BuildPrimeProof`
-  - `BuildPrimeProofWithContext`
-  - bounded canonical-chain walking and proof compression
+  - bounded canonical-chain proof construction
 
 - `core/nipopow/pow.go`
-  - `PrimePoWVerifier`
-  - `VerifyPrimeProofWithPoW`
-  - `VerifyPrimeProofWork`
-  - `CalcRank`
+  - optional PoW/rank verification helpers when a caller supplies the consensus PoW hash function
 
 - `core/nipopow/score.go`
-  - `ScorePrimeProof`
-  - `ComparePrimeProofs`
-  - `CompareProofScores`
-
-- `core/nipopow/adversarial.go`
-  - reusable adversarial verifier-hardening harness
+  - proof scoring/comparison helpers
 
 - `core/nipopow/hierarchy.go`
   - `HierarchyProof`
   - `VerifyHierarchyProof`
-  - read-only Zone/Region -> Prime manifest wrapper checks
+  - Zone/Region -> Prime manifest-wrapper checks
 
 - `core/nipopow/hierarchy_collect.go`
   - `HierarchyProofSource`
   - `HierarchyProofRequest`
-  - `CollectHierarchyProof`
   - `CollectHierarchyProofWithContext`
-  - read-only source/population seam for fixtures, chain storage, or future block-template paths
 
-- `cmd/nipopow-hierarchy-validate`
-  - read-only JSON CLI that opens Prime/Region/Zone DB snapshots and validates an explicit hierarchy wrapper request
+- `core/nipopow/template.go`
+  - `TemplateHierarchyProof`
+  - `BuildTemplateHierarchyProofWithContext`
+  - derives the proof request from a Zone pending template's selected Zone/Region/Prime parent context
 
-- `core/headerchain_nipopow.go`
-  - read-only bridge from canonical chain storage into the proof builder
+- `core/nipopow/template_verify.go`
+  - `VerifyTemplateHierarchyProofArtifact`
+  - offline artifact verifier for opted-in template proofs
 
-- `core/core_nipopow.go`
-  - Core-level proof access
+- `core/nipopow/templateclient`
+  - local pool/miner fetch-and-verify helper
+  - local rate-limited proxy handler
+  - fail-closed checks for missing proof, visible `quairoot`/seal-prefix binding, hierarchy verification, and proof-budget policy
 
-- `internal/quaiapi/backend.go`
-  - backend interface extension
-
-- `quai/api_backend.go`
-  - concrete backend bridge
+- `internal/quaiapi/block_template_nipopow_policy.go`
+  - budget/deployment policy for opted-in block-template proof generation
 
 - `internal/quaiapi/quai_api.go`
-  - bounded Prime-only `quai_getNiPoPoWProof` RPC access
+  - bounded Prime-only `quai_getNiPoPoWProof` access
+  - optional `nipopowProof` attachment in `quai_getBlockTemplate` when explicitly requested
+
+- `cmd/nipopow-template-verify`
+  - standalone JSON verifier for `nipopowProof` artifacts without DB or RPC
+
+- `cmd/nipopow-template-gate`
+  - one-shot local gate that requests an opted-in template, verifies it, and optionally strips the proof from accepted miner-facing output
+
+- `cmd/nipopow-template-proxy`
+  - local JSON-RPC proxy that forces upstream opt-in proof requests, verifies locally, caches accepted templates for equivalent downstream requests, and strips proof before returning miner-facing templates
+
+- `cmd/nipopow-template-observe`
+  - opt-in/default RPC sampler for controlled shadow-mode observation
+
+- `cmd/nipopow-hierarchy-validate`
+  - read-only snapshot validation CLI for explicit hierarchy-wrapper requests
 
 ## Safety model
 
-The Prime proof path is designed as read-only infrastructure.
+The proof path is read-only infrastructure.
 
-Important safety properties:
+Safety properties:
 
-1. The proof builder reads persisted chain data only.
-2. It does not call interlink calculation paths that can mutate storage.
-3. Genesis is handled explicitly so the builder does not attempt to read a nonexistent parent.
+1. Proof builders read persisted chain data only.
+2. Builders avoid helper paths that can mutate storage.
+3. Genesis and early-chain cases are handled explicitly.
 4. Public proof construction is bounded by:
-   - maximum chain walk length
-   - maximum proof header count
-   - maximum `m`
-   - context cancellation
+   - maximum chain walk length;
+   - maximum proof header count;
+   - maximum `m`;
+   - context cancellation;
+   - opt-in block-template proof timeout;
+   - maximum Region/Prime manifest entry count;
+   - maximum serialized `nipopowProof` bytes.
 5. The structural verifier checks:
-   - non-nil proof and headers
-   - valid `m`
-   - sufficient suffix length
-   - anchor consistency
-   - WorkObject header/body binding
-   - interlink root consistency
-   - forward-only interlink jumps
-   - linear final suffix
-6. PoW verification is separated from structural verification because it requires access to the consensus PoW hash function.
-7. Generic public proof verification is intentionally not exposed as an RPC endpoint. A public verifier that accepts arbitrary proofs without canonical-chain context can be misused as a misleading truth oracle.
+   - non-nil proof and headers;
+   - valid `m`;
+   - sufficient suffix length;
+   - anchor consistency;
+   - WorkObject header/body binding;
+   - interlink root consistency;
+   - forward-only interlink jumps;
+   - linear final suffix;
+   - Zone -> Region manifest membership;
+   - Region -> Prime manifest membership;
+   - Prime proof tip binding.
+6. Default `quai_getBlockTemplate` responses stay proof-free.
+7. Opted-in proof failures fail closed: the caller receives an explicit error instead of an unverifiable proof payload.
 
-## Verification levels
+## Block-template opt-in API
 
-### Level 1: package and integration tests
+Default request:
 
-The first stage should pass:
-
-```bash
-go test ./core/nipopow ./core ./internal/quaiapi ./quai -count=1
-go test ./... -run TestNonExistentCompileOnly -count=0
-go vet ./core/nipopow ./internal/quaiapi ./quai
-go build ./cmd/go-quai
-```
-
-### Level 2: real-chain validation
-
-Before relying on this for mining or public production behavior, run the proof builder against real or snapshot chain data:
-
-- recent Prime blocks
-- older Prime blocks
-- short ranges
-- long ranges near the configured limit
-- genesis / early-chain edge cases
-- recent tips
-- malformed/tampered proof inputs
-
-Record:
-
-- proof generation time
-- proof size
-- memory behavior
-- verification result
-- failure mode for malformed requests
-
-The package includes a reusable validation harness for this stage:
-
-```go
-report, err := nipopow.ValidatePrimeProofRanges(ctx, headerChain, nipopow.ValidationOptions{
-    M: 15,
-    Ranges: []nipopow.ValidationRange{
-        {Name: "recent-short", AnchorNumber: recentAnchor, TipNumber: recentTip},
-        {Name: "older-short", AnchorNumber: olderAnchor, TipNumber: olderTip},
-        {Name: "limit-boundary", AnchorNumber: boundaryAnchor, TipNumber: boundaryTip},
-    },
-    Limits: nipopow.DefaultBuildLimits,
-})
-if err != nil {
-    return err
-}
-if report.Failed() {
-    // At least one range failed; inspect report.Results for the exact cause.
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "quai_getBlockTemplate",
+  "params": [
+    {"rules": ["kawpow"]}
+  ]
 }
 ```
 
-`ValidatePrimeProofRanges` records one result per range and continues after range-level failures. Each result includes anchor/tip numbers, anchor/tip hashes, uncompressed chain length, compressed proof header count, estimated encoded proof bytes, elapsed build/verify time, and any error. The harness uses the same read-only `PrimeProofSource` path as public proof generation, so a successful run proves that persisted canonical headers and interlinks can build and verify Prime proofs without mutating storage.
+Default response behavior is unchanged and omits `nipopowProof`.
 
-A command-line real-chain validator is available for offline or snapshot DBs:
+Opted-in request:
 
-```bash
-go run ./cmd/nipopow-prime-validate \
-  --db /path/to/prime/go-quai/chaindata \
-  --m 16 \
-  --lengths 16,64,256,1024 \
-  --max-chain 1024 \
-  --max-headers 1024 \
-  --timeout 3m
-```
-
-The command opens the DB with `ReadOnly: true`, auto-attaches `<db>/ancient` when present, and emits a JSON report with head/genesis metadata, selected ranges, per-range proof metrics, and errors. Use `--ranges name=anchor:tip,name2=anchor:tip` for explicit reviewer samples and `--out report.json` to write the JSON to disk.
-
-Do not point this command directly at a running production LevelDB/freezer store if it is locked. For live nodes, use an offline copy or a same-filesystem hardlink snapshot with independent mutable metadata/lock files (`LOCK`, `ancient/FLOCK`, `CURRENT`, `LOG`, `MANIFEST-*`, `*.log`), run the validator against the snapshot, then remove the snapshot promptly so hardlinked SST files do not pin old compaction data.
-
-### Level 3: adversarial validation
-
-Before treating the proof system as security-critical, add fuzz/property tests and adversarial cases:
-
-- tampered headers
-- swapped WorkObject bodies
-- bad interlink roots
-- backward/no-progress interlink jumps
-- disconnected suffixes
-- stale tips
-- competing proofs with different score vectors
-- anchors not in the tip ancestry
-- oversized requested ranges
-- invalid `m`
-
-The package includes an adversarial validation harness for verifier hardening:
-
-```go
-report, err := nipopow.ValidatePrimeProofAdversarialCases(validProof, []nipopow.AdversarialCase{
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "quai_getBlockTemplate",
+  "params": [
     {
-        Name:          "bad-interlink-root",
-        ExpectedError: nipopow.ErrInterlinkRootMismatch,
-        Mutate: func(proof *nipopow.Proof) error {
-            proof.Headers[1].Body().SetInterlinkHashes(common.Hashes{})
-            return nil
-        },
-    },
-})
-if err != nil {
-    return err
-}
-if report.Failed() {
-    // The baseline failed or a mutated proof verified / failed for the wrong reason.
+      "rules": ["kawpow"],
+      "nipopowProof": true,
+      "nipopowProofM": 2
+    }
+  ]
 }
 ```
 
-Adversarial gate command examples:
+Opted-in response behavior:
 
-```bash
-go test ./core/nipopow -run 'Adversarial|FuzzVerifyPrimeProofRejectsUnsafeMutations' -count=1
-go test ./core/nipopow -run '^$' -fuzz FuzzVerifyPrimeProofRejectsUnsafeMutations -fuzztime=5s
-```
+- Returns the normal block template fields.
+- Adds `nipopowProof` only when explicitly requested.
+- Applies request-budget policy before returning the proof.
+- Returns an explicit error for opted-in proof failures.
 
-Current coverage includes anchor mismatch, nil headers, swapped WorkObject body/header binding, bad interlink roots, disconnected prefixes, non-linear suffixes, no-op mutations that should fail the gate, invalid harness config, and seeded fuzz mutations for invalid `m`, empty headers, anchor mismatch, nil headers, body/header tampering, bad interlinks, disconnected prefixes, and non-linear suffixes.
+## Offline client verification
 
-### Level 4: hierarchy wrapper prototype
-
-The package includes a read-only, non-consensus hierarchy wrapper prototype:
-
-```go
-err := nipopow.VerifyHierarchyProof(&nipopow.HierarchyProof{
-    ZoneHeader:   zoneHeader,
-    RegionHeader: regionHeader,
-    PrimeHeader:  primeManifestCarrier,
-    PrimeProof:   primeProof,
-})
-```
-
-The wrapper verifies:
-
-1. Zone, Region, and Prime header/body binding.
-2. Zone and Region locations are on the same region path.
-3. Region manifest hash commits the provided Region manifest body.
-4. Region manifest contains the Zone header hash.
-5. Prime manifest hash commits the provided Prime manifest body.
-6. Prime manifest contains the Region header hash.
-7. Prime manifest carrier is the tip of a structurally valid Prime NiPoPoW proof.
-8. Zone and Region prime terminus hashes appear somewhere in the proven Prime proof.
-
-This is still not mining-template integration. It intentionally does not read or write chain DB state, expose RPC, change consensus, or mutate block-template behavior. It is a self-contained verifier primitive for proving that the wrapper shape is enforceable before wiring it into real template production.
-
-### Level 5: read-only hierarchy source/collector
-
-The package includes a source/population seam and a DB-snapshot CLI for collecting a hierarchy wrapper from already-persisted data:
-
-```go
-proof, err := nipopow.CollectHierarchyProofWithContext(ctx, source, nipopow.HierarchyProofRequest{
-    ZoneHash:    zoneHash,
-    RegionHash:  regionHash,
-    PrimeAnchor: primeAnchor,
-    PrimeTip:    primeManifestCarrier,
-    M:           m,
-    Limits:      limits,
-})
-```
-
-The source must provide read-only headers, manifests, and Prime proof headers:
-
-```go
-type HierarchyProofSource interface {
-    nipopow.PrimeProofSource
-    Header(hash common.Hash, nodeCtx int) (*types.WorkObject, error)
-    Manifest(hash common.Hash, nodeCtx int) (types.BlockManifest, error)
-}
-```
-
-A local/offline validation command is available for explicit real-data requests:
-
-```bash
-go run ./cmd/nipopow-hierarchy-validate \
-  --prime.db /path/to/prime/go-quai/chaindata \
-  --region.db /path/to/region-0/go-quai/chaindata \
-  --zone.db /path/to/zone-0-0/go-quai/chaindata \
-  --zone-hash 0x... \
-  --region-hash 0x... \
-  --prime-anchor 0x... \
-  --prime-tip 0x... \
-  --m 16
-```
-
-The CLI can also derive a consistent tuple from read-only snapshots without preselecting hashes:
-
-```bash
-go run ./cmd/nipopow-hierarchy-validate \
-  --prime.db /path/to/prime/go-quai/chaindata \
-  --region.db /path/to/region-0/go-quai/chaindata \
-  --zone.db /path/to/zone-0-0/go-quai/chaindata \
-  --auto-select \
-  --auto.region-window 4096 \
-  --auto.prime-window 4096 \
-  --max-chain 1024 \
-  --max-headers 1024 \
-  --max-m 1024 \
-  --timeout 4m \
-  --out hierarchy-auto-selector-report.json
-```
-
-This command opens all DBs with `ReadOnly: true`, hydrates manifests from storage, builds the Prime proof, verifies the hierarchy wrapper, and emits a JSON report. The auto-selector is bounded and context-cancellable; reports include scan counts, candidate counts, selected hashes, selected block numbers, proof header count, and manifest lengths.
-
-Real-chain storage has two important hierarchy details:
-
-- The committed manifest should be read from the `WorkObjectBody` when available. Standalone manifest records can be absent for Prime or stale/mismatched for Region; they are kept as a fallback only.
-- `WorkObject.Location()` is the origin slice, not the proof order. Coincident Region/Prime carriers can be zone-located work objects, so the verifier binds them through manifest commitments, Prime proof membership, and region path instead of rejecting solely on `Location().Context()`.
-
-The hierarchy CLI still does not expose RPC, mutate DB state, or change mining-template behavior.
-
-### Level 6: mining-template readiness
-
-Mining-template use requires the later stages:
-
-1. Source/populate hierarchy wrapper data from actual block-template/HeaderChain selection paths, not just explicit hashes.
-2. Pool/client verifier library or example.
-3. Optional proof delivery through `quai_getBlockTemplate`.
-4. Config/feature flag and request limits.
-5. Shadow-mode deployment before pools depend on the result economically.
-
-## Recommended upstream PR sequence
-
-Even if the implementation is completed internally before review, the upstream GitHub changes should remain split into small, reviewable PRs.
-
-### PR 1: Prime NiPoPoW core
-
-Scope:
-
-- `core/nipopow`
-- read-only HeaderChain/Core integration
-- bounded Prime proof RPC, if accepted as an experimental proof-fetch endpoint
-- tests
-- this documentation
-
-This PR should be mergeable on its own and should not claim to solve trustless mining templates yet.
-
-Suggested title:
+A pool/client should treat the producing node as untrusted:
 
 ```text
-feat(core): add read-only Prime NiPoPoW proof engine
+producer node -> opt-in block template + nipopowProof
+pool/client   -> local verifier, no DB, no RPC trust
+miner-facing  -> accepted proof-stripped template, or fail closed
 ```
 
-### PR 2: Zone/Region/Prime manifest wrapper
+The local verifier checks:
 
-Scope:
+- proof presence;
+- visible `quairoot`/template-seal binding;
+- template metadata binding;
+- Zone/Region/Prime manifest wrapper binding;
+- Prime proof structure;
+- request-budget policy.
 
-- prove Zone context is committed into Region context
-- prove Region context is committed into Prime context
-- combine wrapper proof with Prime NiPoPoW proof
-- verifier for the combined hierarchical proof
+Example one-shot gate:
 
-Suggested title:
-
-```text
-feat(core): add hierarchical NiPoPoW manifest wrapper
+```bash
+go run ./cmd/nipopow-template-gate \
+  --rpc https://example.invalid \
+  --m 2 \
+  --strip-proof
 ```
 
-### PR 3: Mining-template and pool integration
+Example local proxy self-test:
 
-Scope:
-
-- optional proof field in `quai_getBlockTemplate`
-- config/feature flag
-- request limits and timeout behavior
-- pool/client verifier documentation or minimal library/example
-- shadow-mode guidance
-
-Suggested title:
-
-```text
-feat(miner): expose optional NiPoPoW proof with block templates
+```bash
+go run ./cmd/nipopow-template-proxy \
+  --upstream https://example.invalid \
+  --listen 127.0.0.1:8570 \
+  --m 2 \
+  --self-test-samples 2
 ```
 
-## Why not one large PR?
+## Request-budget policy
 
-A single PR containing Prime proof logic, manifest wrappers, block-template changes, and pool verifier code would be harder to review and riskier to merge. Splitting the work keeps each layer independently testable:
+The default block-template proof policy is conservative:
 
-1. Prime proof correctness.
-2. Hierarchical anchoring correctness.
-3. Mining-template integration correctness.
+- proof build timeout: 2s;
+- max `m`: 64;
+- max hierarchy/proof walk: bounded by `DefaultBuildLimits`;
+- max Prime proof headers: bounded;
+- max Region/Prime manifest hashes: bounded;
+- max serialized proof bytes: bounded.
 
-The implementation can still be developed end-to-end internally before opening the final upstream PRs. The split is for reviewability, risk control, and easier rollback.
+Rate limiting and authentication belong at the RPC gateway, pool adapter, or local proxy layer. The in-process API layer does not have reliable per-client identity.
 
-## Mainnet-readiness bar
+## Generated evidence policy
 
-Before this should influence mainnet mining decisions:
+Do not commit private deployment reports, live-node logs, local DB paths, PIDs, hostnames, wallet addresses, Tailscale/VPN details, or raw miner canary artifacts to the upstream PR.
 
-- all package and integration tests pass
-- real-chain validation completed
-- adversarial/fuzz validation completed
-- proof generation remains bounded under bad inputs
-- no DB writes from proof paths
-- no default consensus or mining behavior change
-- feature flag or opt-in API behavior
-- pool/client verifier tested independently from the prover
-- shadow-mode operation before economic reliance
-- rollback path documented
+If evidence is needed for review, provide a short sanitized summary or a deterministic test fixture that contains no local infrastructure details.
 
-## Short version
+Generated outputs should be written outside the repo or under ignored report paths.
 
-The current implementation is the Prime-chain foundation. It is designed to be safe, read-only, and independently testable. The full trust-reduced mining-template flow requires two additional layers: a Zone/Region/Prime manifest wrapper and an opt-in block-template/pool verifier integration.
+## Verification commands
+
+Recommended local checks for this stack:
+
+```bash
+go test ./core/nipopow ./core/nipopow/templateclient ./cmd/nipopow-template-verify ./cmd/nipopow-template-gate ./cmd/nipopow-template-proxy ./cmd/nipopow-template-observe ./internal/quaiapi ./quai -count=1
+go build ./cmd/go-quai ./cmd/nipopow-template-verify ./cmd/nipopow-template-gate ./cmd/nipopow-template-proxy ./cmd/nipopow-template-observe
+git diff --check
+```
+
+## Remaining review questions
+
+This stack is suitable for technical review, but the team still needs to confirm:
+
+- QIP-0009 semantics for superblock scoring and verifier policy;
+- exact Prime proof rank/difficulty policy expected by pools;
+- stale/reorg behavior for template context;
+- whether hierarchy proof fields belong in core, API, tooling, or a split package;
+- how much pool-side tooling should live in-tree versus external adapters.

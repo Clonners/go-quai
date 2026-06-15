@@ -57,6 +57,7 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.ParentUncledDeltaEntropy = make([]*hexutil.Big, common.HierarchyDepth)
 	enc.ParentHash = make([]common.Hash, common.HierarchyDepth-1)
 	enc.Number = make([]*hexutil.Big, common.HierarchyDepth-1)
+	enc.ManifestHash = make([]common.Hash, common.HierarchyDepth)
 
 	copy(enc.ManifestHash, h.ManifestHashArray())
 	for i := 0; i < common.HierarchyDepth; i++ {

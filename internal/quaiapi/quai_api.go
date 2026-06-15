@@ -93,12 +93,20 @@ func (s *PublicQuaiAPI) ClientVersion() string {
 // PublicBlockChainQuaiAPI provides an API to access the Quai blockchain.
 // It offers only methods that operate on public data that is freely available to anyone.
 type PublicBlockChainQuaiAPI struct {
-	b Backend
+	b                          Backend
+	nipopowTemplateProofPolicy BlockTemplateNiPoPoWRequestPolicy
 }
 
 // NewPublicBlockChainQuaiAPI creates a new Quai blockchain API.
 func NewPublicBlockChainQuaiAPI(b Backend) *PublicBlockChainQuaiAPI {
-	return &PublicBlockChainQuaiAPI{b}
+	return NewPublicBlockChainQuaiAPIWithNiPoPoWPolicy(b, BlockTemplateNiPoPoWRequestPolicy{})
+}
+
+// NewPublicBlockChainQuaiAPIWithNiPoPoWPolicy creates a new Quai blockchain API
+// with an explicit deployment policy for opted-in block-template NiPoPoW proof
+// requests. The zero-value policy uses conservative defaults.
+func NewPublicBlockChainQuaiAPIWithNiPoPoWPolicy(b Backend, policy BlockTemplateNiPoPoWRequestPolicy) *PublicBlockChainQuaiAPI {
+	return &PublicBlockChainQuaiAPI{b: b, nipopowTemplateProofPolicy: policy}
 }
 
 // ChainId is the replay-protection chain id for the current Quai chain config.
@@ -1162,6 +1170,13 @@ type BlockTemplateRequest struct {
 	ExtraNonce2Len int                     `json:"extranonce2len,omitempty"` // extra nonce2 length in bytes
 	ExtraData      string                  `json:"extradata,omitempty"`      // string less than 30 bytes
 	Coinbase       common.MixedcaseAddress `json:"coinbase,omitempty"`
+
+	// NiPoPoWProof is an explicit opt-in for attaching the read-only hierarchy
+	// proof that backs this mining template. The field is omitted by default to
+	// keep the public block template payload unchanged unless requested.
+	NiPoPoWProof       bool        `json:"nipopowProof,omitempty"`
+	NiPoPoWProofM      uint64      `json:"nipopowProofM,omitempty"`
+	NiPoPoWPrimeAnchor common.Hash `json:"nipopowPrimeAnchor,omitempty"`
 }
 
 // GetBlockTemplate retrieves a new block template to mine
@@ -1202,11 +1217,29 @@ func (s *PublicBlockChainQuaiAPI) GetBlockTemplate(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	return s.marshalAuxPowTemplate(pendingHeader, request)
+	template, err := s.marshalAuxPowTemplate(pendingHeader, request)
+	if err != nil {
+		return nil, err
+	}
+	if request != nil && request.NiPoPoWProof {
+		proof, err := s.buildBlockTemplateNiPoPoWProof(ctx, pendingHeader, request)
+		if err != nil {
+			return nil, err
+		}
+		template["nipopowProof"] = proof
+	}
+	return template, nil
 }
 
-// marshalAuxPowTemplate formats a WorkObject as a SHA256d/Bitcoin getblocktemplate response
+// marshalAuxPowTemplate formats a WorkObject as a SHA256d/Bitcoin getblocktemplate response.
 func (s *PublicBlockChainQuaiAPI) marshalAuxPowTemplate(wo *types.WorkObject, request *BlockTemplateRequest) (map[string]interface{}, error) {
+	return MarshalAuxPowTemplate(wo, request)
+}
+
+// MarshalAuxPowTemplate formats a WorkObject as a SHA256d/Bitcoin getblocktemplate response.
+// It is exported so read-only validation harnesses can build the same template
+// shape without spinning up a full RPC backend.
+func MarshalAuxPowTemplate(wo *types.WorkObject, request *BlockTemplateRequest) (map[string]interface{}, error) {
 	auxPow := wo.AuxPow()
 	if auxPow == nil {
 		return nil, errors.New("no AuxPow in pending header")

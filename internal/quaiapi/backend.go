@@ -141,6 +141,10 @@ type Backend interface {
 	GetTerminiByHash(hash common.Hash) *types.Termini
 	GetHeaderByHash(hash common.Hash) *types.WorkObject
 	GetNiPoPoWProof(ctx context.Context, anchor common.Hash, tip common.Hash, m uint64) (*nipopow.Proof, error)
+	GetNiPoPoWProofHeader(blockHash common.Hash) (*types.WorkObject, error)
+	GetHierarchyBlock(blockHash common.Hash, nodeCtx int) *types.WorkObject
+	GetHierarchyManifest(blockHash common.Hash, nodeCtx int) (types.BlockManifest, error)
+	GetBlockTemplateNiPoPoWProof(ctx context.Context, pending *types.WorkObject, opts nipopow.TemplateHierarchyProofOptions) (*nipopow.TemplateHierarchyProof, error)
 	IsGenesisHash(hash common.Hash) bool
 	GetQuaiHeaderForDonorHash(donorHash common.Hash) *types.WorkObjectHeader
 	GetBlockForWorkShareHash(workshareHash common.Hash) *types.WorkObject

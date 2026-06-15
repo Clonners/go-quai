@@ -43,6 +43,9 @@ ask go-quai to pre-populate the returned coinbase transaction. When supplied:
 | `extranonce2` | Hex string (≤ 8 bytes / 16 hex chars) | Added after `extranonce1` and padded with zeros to 8 bytes when shorter. |
 | `extradata` | UTF-8 string (≤ 30 bytes) | Overwrites the first `coinbaseAuxExtraBytesLength` bytes of `coinb2` (the mutable aux data region). |
 | `coinbase` | 0x-prefixed 20-byte Quai address | Sets the pending header's primary coinbase. Must be a valid in-scope address for the requesting node. |
+| `nipopowProof` | Boolean | Explicitly opt in to an experimental read-only hierarchy proof for the persisted Zone/Region/Prime context backing the template. Omitted/false keeps the response schema unchanged. |
+| `nipopowProofM` | Number | Optional NiPoPoW suffix/security parameter for `nipopowProof`; omitted or zero uses the default. |
+| `nipopowPrimeAnchor` | 0x-prefixed hash | Optional explicit Prime proof anchor; omitted uses the template context's derived Prime anchor. |
 
 go-quai recalculates the coinbase and merkle root inside the template before
 returning the response, so miners can hash immediately with the requested values. If
@@ -51,6 +54,31 @@ the fields are omitted they default to zero bytes, matching the prior behavior.
 When `coinbase` is supplied, the pending header returned by `quai_getBlockTemplate`
 already targets that address; pools no longer need to rewrite the header to pay a
 specific payout account (subject to scope validation for the node's location).
+
+### Optional NiPoPoW proof opt-in
+
+`quai_getBlockTemplate` does not include a proof by default. Pools that want
+experimental trust-reduced template evidence can request it explicitly:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "quai_getBlockTemplate",
+  "params": [
+    {
+      "rules": ["kawpow"],
+      "nipopowProof": true,
+      "nipopowProofM": 16
+    }
+  ]
+}
+```
+
+When enabled, the response adds `nipopowProof`. This proof binds the pending
+Zone template to the already-persisted Zone/Region/Prime context it extends. It
+does **not** claim that the unmined pending template is already included in any
+future Region manifest.
 
 ### Response Example
 ```json
@@ -103,6 +131,7 @@ specific payout account (subject to scope validation for the node's location).
 | `version` | number | Block header version to use. First byte of version cannot be changed, last three bytes can be changed in compliance with bip320 (i.e asicboost). |
 | `quairoot` | string | first 6 bytes of the sealhash without the time, so everytime this changes, new job needs to be sent to the miner|
 | `quaiheight` | number | uint64 encoding of the quai zone chain |
+| `nipopowProof` | object | Optional, only present when request field `nipopowProof` is true. Contains the template hash/seal hash/parent hash, derived hierarchy request, and verified Zone/Region/Prime -> Prime NiPoPoW proof. |
 
 `bits`, `height`, `previousblockhash`, `coinb1`, `coinb2` from byte 31 till end and first byte of `version` are signed donor-chain data.
 Changing them will result in an invalid block.

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -214,11 +216,18 @@ func (p *TemplateProxy) cacheKey(downstreamRequest map[string]any) (string, erro
 	} else if _, ok := effectiveRequest["rules"]; !ok {
 		effectiveRequest["rules"] = []string{"kawpow"}
 	}
-	data, err := json.Marshal(effectiveRequest)
-	if err != nil {
-		return "", fmt.Errorf("encode cache key: %w", err)
+	// Build a deterministic cache key: sort key-value pairs so identical logical
+	// requests always produce the same cache key regardless of map iteration order.
+	pairs := make([]string, 0, len(effectiveRequest))
+	for k, v := range effectiveRequest {
+		data, err := json.Marshal(map[string]any{k: v})
+		if err != nil {
+			return "", fmt.Errorf("encode cache key field %q: %w", k, err)
+		}
+		pairs = append(pairs, string(data))
 	}
-	return string(data), nil
+	sort.Strings(pairs)
+	return strings.Join(pairs, ","), nil
 }
 
 func (p *TemplateProxy) pruneExpiredLocked(now time.Time) {

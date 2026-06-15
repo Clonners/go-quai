@@ -9,7 +9,10 @@ import (
 	"github.com/dominant-strategies/go-quai/core/types"
 )
 
-const DefaultTemplateHierarchyProofM uint64 = 16
+const (
+	DefaultTemplateHierarchyProofM     uint64 = 16
+	DefaultMaxTemplateFallbackIter     int    = 512
+)
 
 var (
 	ErrTemplateHierarchyProofMissingPending = errors.New("nipopow template hierarchy proof missing pending header")
@@ -139,6 +142,9 @@ func selectManifestBackedTemplateRequest(ctx context.Context, source HierarchyPr
 		return HierarchyProofRequest{}, fmt.Errorf("%w: prime context manifest: %v", ErrTemplateHierarchyProofMissingBacking, err)
 	}
 	candidateRegions := templateRegionCandidates(source, regionHash, primeManifest)
+	// Bound fallback iterations to prevent excessive source calls.
+	maxIterations := DefaultMaxTemplateFallbackIter
+	iterations := 0
 	for _, candidateRegion := range candidateRegions {
 		if err := ctx.Err(); err != nil {
 			return HierarchyProofRequest{}, err
@@ -151,6 +157,10 @@ func selectManifestBackedTemplateRequest(ctx context.Context, source HierarchyPr
 			continue
 		}
 		for _, candidateZone := range manifest {
+			iterations++
+			if iterations > maxIterations {
+				return HierarchyProofRequest{}, fmt.Errorf("%w: exceeded %d fallback iterations (zone=%s region=%s prime=%s)", ErrTemplateHierarchyProofMissingBacking, maxIterations, zoneHash.Hex(), regionHash.Hex(), primeTip.Hex())
+			}
 			if err := ctx.Err(); err != nil {
 				return HierarchyProofRequest{}, err
 			}

@@ -10,6 +10,9 @@ traces/
 *.sh
 **/testdata/
 *.cov
+reports/nipopow/
+hierarchy-*-report.json
+nipopow-*-report.json
 chain-visualizer/node_modules*
 
 # Binary executables
